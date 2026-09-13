@@ -1,0 +1,11 @@
+{
+  "name": "vietbridge-social-operator-v2",
+  "version": "2.0.0-prototype.1",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=23.6" },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js"
+  }
+}
