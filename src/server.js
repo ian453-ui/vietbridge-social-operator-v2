@@ -10,6 +10,7 @@ const server=createServer(async(req,res)=>{
   const url=new URL(req.url||"/","http://127.0.0.1");
   if(req.method==="GET"&&url.pathname==="/")return file(res,"index.html","text/html; charset=utf-8");
   if(req.method==="GET"&&url.pathname==="/app.js")return file(res,"app.js","text/javascript; charset=utf-8");
+  if(req.method==="GET"&&url.pathname==="/qa-cases.js")return file(res,"qa-cases.js","text/javascript; charset=utf-8");
   if(req.method==="GET"&&url.pathname==="/styles.css")return file(res,"styles.css","text/css; charset=utf-8");
   if(req.method==="GET"&&url.pathname==="/api/state")return json(res,200,state);
   if(req.method==="POST"&&url.pathname==="/api/reset"){state=initialState();return json(res,200,state)}
