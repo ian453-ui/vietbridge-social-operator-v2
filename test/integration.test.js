@@ -22,3 +22,14 @@ test('HTTP persistence, isolation, approvals, duplicate prevention and recovery'
  assert.ok((await read('ws-vietbridge')).audit.length>0);
  }finally{await close();}
 });
+
+test('Facebook Group API creates tenant-scoped profile, account, content and independent jobs',async()=>{
+ const path=join(mkdtempSync(join(tmpdir(),'smo-fb-http-')),'test.sqlite'),server=createApp(path);await new Promise(r=>server.listen(0,'127.0.0.1',r));const base='http://127.0.0.1:'+server.address().port;
+ try{const state=await (await fetch(base+'/api/state?workspace=ws-vietbridge')).json(),headers={'content-type':'application/json','x-local-token':state.token,origin:base};const post=async(path,body)=>{const r=await fetch(base+path,{method:'POST',headers,body:JSON.stringify(body)});return {status:r.status,value:await r.json()}};
+ const profile=(await post('/api/workspaces/ws-vietbridge/profiles',{name:'FB',cdp_port:19124,user_data_dir:'/tmp/fb-http'})).value;
+ const account=(await post('/api/workspaces/ws-vietbridge/accounts',{display_name:'VB',expected_identity:'VB',profile_id:profile.id})).value;
+ const g1=(await post('/api/workspaces/ws-vietbridge/groups/manual',{account_id:account.id,name:'A',url:'https://facebook.com/groups/1'})).value,g2=(await post('/api/workspaces/ws-vietbridge/groups/manual',{account_id:account.id,name:'B',url:'https://facebook.com/groups/2'})).value;
+ const content=(await post('/api/workspaces/ws-vietbridge/content',{title:'中文',body:'中文正文完整',media:[]})).value,jobs=await post('/api/workspaces/ws-vietbridge/group-jobs',{account_id:account.id,content_id:content.id,group_ids:[g1.id,g2.id]});assert.equal(jobs.status,201);assert.equal(jobs.value.length,2);
+ const isolated=await fetch(base+'/api/facebook?workspace=ws-abc').then(r=>r.json());assert.equal(isolated.accounts.length,0);
+ }finally{await new Promise(r=>server.close(r));}
+});
