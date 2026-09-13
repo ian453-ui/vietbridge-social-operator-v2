@@ -1,28 +1,32 @@
-import {createServer} from "node:http";
-import {readFile} from "node:fs/promises";
-import {dirname,resolve} from "node:path";
-import {fileURLToPath} from "node:url";
-import {initialState,switchWorkspace,canExecute,reconcile,injectScenario} from "./domain.js";
-
+import {createServer} from 'node:http';
+import {readFile} from 'node:fs/promises';
+import {dirname,join} from 'node:path';
+import {homedir} from 'node:os';
+import {fileURLToPath} from 'node:url';
+import {randomUUID} from 'node:crypto';
+import {Store} from './store.js';
 const root=dirname(fileURLToPath(import.meta.url));
-let state=initialState();
-const server=createServer(async(req,res)=>{
-  const url=new URL(req.url||"/","http://127.0.0.1");
-  if(req.method==="GET"&&url.pathname==="/")return file(res,"index.html","text/html; charset=utf-8");
-  if(req.method==="GET"&&url.pathname==="/app.js")return file(res,"app.js","text/javascript; charset=utf-8");
-  if(req.method==="GET"&&url.pathname==="/qa-cases.js")return file(res,"qa-cases.js","text/javascript; charset=utf-8");
-  if(req.method==="GET"&&url.pathname==="/styles.css")return file(res,"styles.css","text/css; charset=utf-8");
-  if(req.method==="GET"&&url.pathname==="/api/state")return json(res,200,state);
-  if(req.method==="POST"&&url.pathname==="/api/reset"){state=initialState();return json(res,200,state)}
-  if(req.method==="POST"&&url.pathname==="/api/context"){const b=await body(req);if(b.mode==="agency"){state.mode="agency";state.workspaceId=null;state.route="today";return json(res,200,{ok:true,state})}const out=switchWorkspace(state,b.workspaceId);return json(res,out.ok?200:409,{...out,state})}
-  if(req.method==="POST"&&url.pathname==="/api/route"){const b=await body(req);state.route=String(b.route||"today");return json(res,200,{ok:true,state})}
-  if(req.method==="POST"&&url.pathname==="/api/scenario"){const b=await body(req);const task=injectScenario(state,String(b.scenario));return json(res,200,{ok:true,task,state})}
-  const exec=url.pathname.match(/^\/api\/tasks\/([^/]+)\/execute$/);if(req.method==="POST"&&exec){const task=state.tasks.find(t=>t.id===exec[1]);if(!task)return json(res,404,{error:"任务不存在"});const out=canExecute(state,task);if(out.ok){task.state="COMPOSER_READY";task.reason="Mock Composer 已准备；Facebook Group 仍需人工最终点击"}return json(res,out.ok?200:409,{...out,task,state})}
-  const rec=url.pathname.match(/^\/api\/tasks\/([^/]+)\/reconcile$/);if(req.method==="POST"&&rec){const b=await body(req);const out=reconcile(state,rec[1],Boolean(b.found));return json(res,out.ok?200:409,{...out,state})}
-  return json(res,404,{error:"NOT_FOUND"});
-});
-async function file(res,name,type){try{const data=await readFile(resolve(root,name));res.writeHead(200,{"content-type":type,"cache-control":"no-store","x-content-type-options":"nosniff"});res.end(data)}catch{json(res,404,{error:"NOT_FOUND"})}}
-async function body(req){let text="";for await(const c of req){text+=c;if(text.length>1_000_000)throw Error("请求过大")}return JSON.parse(text||"{}")}
-function json(res,status,value){res.writeHead(status,{"content-type":"application/json; charset=utf-8","cache-control":"no-store"});res.end(JSON.stringify(value))}
-export function start(port=Number(process.env.SOCIAL_OPERATOR_V2_PORT||17882)){return new Promise(resolveStart=>server.listen(port,"127.0.0.1",()=>resolveStart(server)))}
-if(process.argv[1]===fileURLToPath(import.meta.url)){await start();console.log("VietBridge Social Operator V2: http://127.0.0.1:17882")}
+export function createApp(dbPath=join(homedir(),'Library/Application Support/VietBridgeSocialOperatorV2/mock.sqlite')){
+ const store=new Store(dbPath),token=randomUUID();
+ const server=createServer(async(req,res)=>{try{
+  const origin=`http://${req.headers.host}`;
+  if(!/^127\.0\.0\.1:\d+$/.test(req.headers.host||''))throw Error('无效主机');
+  const url=new URL(req.url,origin);
+  res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');
+  if(req.method==='GET'&&['/','/client.js','/styles.css'].includes(url.pathname)){
+   const name=url.pathname==='/'?'index.html':url.pathname.slice(1);res.setHeader('Content-Type',name.endsWith('.js')?'text/javascript':name.endsWith('.css')?'text/css':'text/html');return res.end(await readFile(join(root,name)));
+  }
+  if(req.method==='GET'&&url.pathname==='/api/state')return send(res,200,{...store.view(url.searchParams.get('workspace')),token});
+  if(req.method==='GET'&&url.pathname==='/api/health')return send(res,200,{ok:true,version:'2.0.0-prototype.2',mode:'mock',persistent:true});
+  if(req.method==='POST'){
+   if(req.headers.origin!==origin||req.headers['x-local-token']!==token||req.headers['content-type']!=='application/json')throw Error('本地请求验证失败，请刷新页面');
+   let raw='';for await(const c of req){raw+=c;if(raw.length>100000)throw Error('请求过大');}const input=JSON.parse(raw||'{}');
+   const m=url.pathname.match(/^\/api\/workspaces\/([^/]+)\/(tasks|content|comments)\/([^/]+)\/(\w+)$/);
+   if(m)return send(res,200,store.command(m[1],m[2],m[3],m[4],input));
+  }
+  send(res,404,{error:'NOT_FOUND'});
+ }catch(e){send(res,409,{error:e.message});}});
+ server.on('close',()=>store.close());return server;
+}
+function send(res,status,x){res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(x));}
+if(process.argv[1]===fileURLToPath(import.meta.url))createApp().listen(17882,'127.0.0.1',()=>console.log('V2 Mock http://127.0.0.1:17882'));
