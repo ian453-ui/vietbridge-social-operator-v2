@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import {mkdtempSync} from 'node:fs';import {tmpdir} from 'node:os';import {join} from 'node:path';import {createApp} from '../src/server.js';
+import test from 'node:test';import assert from 'node:assert/strict';import {chmodSync,mkdtempSync,writeFileSync} from 'node:fs';import {tmpdir} from 'node:os';import {dirname,join} from 'node:path';import {createApp} from '../src/server.js';
 test('HTTP persistence, isolation, approvals, duplicate prevention and recovery',async()=>{
  const path=join(mkdtempSync(join(tmpdir(),'smo-v2-')),'test.sqlite');let server,base,token;
  async function start(){server=createApp(path);await new Promise(r=>server.listen(0,'127.0.0.1',r));base='http://127.0.0.1:'+server.address().port;token=(await read()).token;}
@@ -27,9 +27,18 @@ test('Facebook Group API creates tenant-scoped profile, account, content and ind
  const path=join(mkdtempSync(join(tmpdir(),'smo-fb-http-')),'test.sqlite'),server=createApp(path);await new Promise(r=>server.listen(0,'127.0.0.1',r));const base='http://127.0.0.1:'+server.address().port;
  try{const state=await (await fetch(base+'/api/state?workspace=ws-vietbridge')).json(),headers={'content-type':'application/json','x-local-token':state.token,origin:base};const post=async(path,body)=>{const r=await fetch(base+path,{method:'POST',headers,body:JSON.stringify(body)});return {status:r.status,value:await r.json()}};
  const profile=(await post('/api/workspaces/ws-vietbridge/profiles',{name:'FB',cdp_port:19124,user_data_dir:'/tmp/fb-http'})).value;
+ const config=join(dirname(path),'account.env');writeFileSync(config,'FB_ACCOUNT_NAME=Imported\nFB_PAGE_NAME=Imported Page\nFB_PAGE_ID=3003\nFB_PAGE_ACCESS_TOKEN=must-not-leak\n');chmodSync(config,0o600);
+ const imported=await post('/api/workspaces/ws-vietbridge/accounts/import-local',{config_url:`file://${config}`});assert.equal(imported.value.external_id,'3003');assert.doesNotMatch(JSON.stringify(imported.value),/must-not-leak/);
  const account=(await post('/api/workspaces/ws-vietbridge/accounts',{display_name:'VB',expected_identity:'VB',profile_id:profile.id})).value;
- const g1=(await post('/api/workspaces/ws-vietbridge/groups/manual',{account_id:account.id,name:'A',url:'https://facebook.com/groups/1'})).value,g2=(await post('/api/workspaces/ws-vietbridge/groups/manual',{account_id:account.id,name:'B',url:'https://facebook.com/groups/2'})).value;
- const content=(await post('/api/workspaces/ws-vietbridge/content',{title:'中文',body:'中文正文完整',media:[]})).value,jobs=await post('/api/workspaces/ws-vietbridge/group-jobs',{account_id:account.id,content_id:content.id,group_ids:[g1.id,g2.id]});assert.equal(jobs.status,201);assert.equal(jobs.value.length,2);
+ const g1=(await post('/api/workspaces/ws-vietbridge/groups/manual',{account_id:account.id,name:'A',url:'https://facebook.com/groups/1'})).value,g2=(await post('/api/workspaces/ws-vietbridge/groups/manual',{account_id:account.id,name:'Visa B',url:'https://facebook.com/groups/2'})).value;
+ const content=(await post('/api/workspaces/ws-vietbridge/content',{title:'中文',body:'中文正文完整',media:[]})).value;
+ const blocked=await post('/api/workspaces/ws-vietbridge/group-jobs',{account_id:account.id,content_id:content.id,group_ids:[g1.id,g2.id],group_name_exclude:'visa'});assert.equal(blocked.status,409);
+ const jobs=await post('/api/workspaces/ws-vietbridge/group-jobs',{account_id:account.id,content_id:content.id,group_ids:[g1.id,g2.id]});assert.equal(jobs.status,201);assert.equal(jobs.value.length,2);
  const isolated=await fetch(base+'/api/facebook?workspace=ws-abc').then(r=>r.json());assert.equal(isolated.accounts.length,0);
  }finally{await new Promise(r=>server.close(r));}
+});
+
+test('customer API creates and edits a workspace',async()=>{
+ const path=join(mkdtempSync(join(tmpdir(),'smo-http-customer-')),'db.sqlite'),server=createApp(path);await new Promise(r=>server.listen(0,'127.0.0.1',r));const base=`http://127.0.0.1:${server.address().port}`;
+ try{const state=await fetch(base+'/api/state').then(r=>r.json()),headers={'content-type':'application/json','x-local-token':state.token,origin:base};const call=async body=>{const r=await fetch(base+'/api/workspaces',{method:'POST',headers,body:JSON.stringify(body)});return {status:r.status,value:await r.json()}};const created=await call({name:'Client A',brand:'Brand A'});assert.equal(created.status,201);const edited=await call({...created.value,name:'Client B'});assert.equal(edited.status,200);assert.equal(edited.value.id,created.value.id);const isolated=await fetch(base+`/api/state?workspace=${created.value.id}`).then(r=>r.json());assert.equal(isolated.content.length,0);assert.equal(isolated.workspaces.find(x=>x.id===created.value.id).name,'Client B');}finally{await new Promise(r=>server.close(r))}
 });

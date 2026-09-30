@@ -6,7 +6,9 @@ On this Mac, `com.vietbridge.social-operator-v2` runs the local service automati
 
 The app does not import, write, migrate, or replace the Publisher-P0 database. Facebook Groups uses a separate browser adapter and local state boundary.
 
-The corrected app has four operational tabs: unchanged V1 Publisher, Facebook Groups, Facebook Inbox, and Accounts/Settings. V1 remains isolated at port 17880 with its own database and tests. V2 adds an independent local database for tenant Facebook mappings, managed Chrome execution profiles, joined groups, frozen content, per-group jobs, post evidence, comments, and reply intents.
+The app keeps V1 Publisher isolated and provides V2 Facebook Groups, Inbox, proactive engagement, publication verification, and account settings. V1 remains isolated at port 17880 with its own database and tests. V2 uses an independent local database for tenant Facebook mappings, managed Chrome execution profiles, joined groups, frozen content, per-group jobs, post evidence, comments, reply intents, proactive candidates, actions, conversations, fact sources, and daily per-post quota reservations.
+
+The proactive engagement engine is fail-closed. It scans only joined groups that are explicitly enabled, ranks candidates instead of acting in DOM order, keeps like and initial reply as separate actions sharing one daily post slot, and requires browser readback for every write. Ambiguous results remain `RECONCILE_PENDING` and cannot be retried normally. External writes still require a configured authorized execution mode, matching Facebook identity, enabled global/account/group switches, and an exact permitted account/group scope.
 
 ## Facebook setup
 

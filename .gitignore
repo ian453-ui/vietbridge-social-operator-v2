@@ -4,3 +4,5 @@ data/
 node_modules/
 .env
 *.sqlite*
+.playwright-cli/
+https:/
