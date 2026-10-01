@@ -103,13 +103,30 @@ export class FacebookBrowser {
         await assertSafeFacebookPage(page,group.url);
         const actor=await currentActorName(page);if(!identityMatches(actor,checked.externalId,account))throw new Error('扫描过程中 Facebook 身份发生变化，已停止');
         await page.locator('div[role="article"]').first().waitFor({state:'visible',timeout:12000}).catch(()=>{});
-        const raw=await page.locator('div[role="article"]').evaluateAll((nodes,max)=>nodes.slice(0,max).map(node=>{
-          const links=[...node.querySelectorAll('a[href]')].map(a=>({url:a.href,text:(a.textContent||'').trim(),label:a.getAttribute('aria-label')}));
-          const postLinks=links.filter(a=>/\/groups\/[^/]+\/(posts|permalink)\//.test(a.url));
-          return {body:(node.innerText||'').trim(),links,time:node.querySelector('abbr[data-utime]')?.getAttribute('data-utime')||node.querySelector('time[datetime]')?.getAttribute('datetime')||null,times:postLinks.flatMap(a=>[a.label,a.text]).filter(Boolean)};
-        }),settings.max_posts_per_group);
+        await page.locator('a[href*="/posts/"],a[href*="/permalink/"],a[href*="set=gm."]').first().waitFor({state:'visible',timeout:8000}).catch(()=>{});
+        const raw=await page.evaluate(({max,groupId})=>{
+          const canonicalPostLink=url=>{try{const parsed=new URL(url),direct=parsed.pathname.match(/^\/groups\/([^/]+)\/(?:posts|permalink)\/(\d+)\/?$/);if(direct)return direct[1]===groupId?`https://www.facebook.com/groups/${direct[1]}/posts/${direct[2]}/`:null;const photo=parsed.pathname==='/photo/'&&parsed.searchParams.get('set')?.match(/^gm\.(\d+)$/),photoGroup=parsed.searchParams.get('idorvanity');return photo&&photoGroup===groupId?`https://www.facebook.com/groups/${photoGroup}/posts/${photo[1]}/`:null}catch{return null}};
+          const rows=[],seen=new Set(),anchors=[...document.querySelectorAll('a[href]')].filter(a=>canonicalPostLink(a.href));
+          for(const anchor of anchors){
+            const permalink=canonicalPostLink(anchor.href);if(!permalink||seen.has(permalink))continue;
+            let card=anchor;
+            for(let i=0;i<18&&card;i++,card=card.parentElement){
+              const text=(card.innerText||'').replace(/\s+/g,' ').trim();
+              if(text.length>8000)break;
+              const hasAuthor=[...card.querySelectorAll('a[href]')].some(a=>new URL(a.href).pathname.startsWith(`/groups/${groupId}/user/`));
+              if(hasAuthor&&text.length>=40){break;}
+            }
+            const text=(card?.innerText||'').trim(),links=[...(card?.querySelectorAll('a[href]')||[])].map(a=>({url:a.href,text:(a.innerText||a.textContent||'').trim(),label:a.getAttribute('aria-label')}));
+            if(!text||!links.some(link=>canonicalPostLink(link.url)===permalink))continue;
+            const markers=[...(card.querySelectorAll('abbr,time,[data-utime],[aria-label],[title]'))].flatMap(node=>[node.getAttribute('data-utime'),node.getAttribute('datetime'),node.getAttribute('aria-label'),node.getAttribute('title'),node.textContent]).map(x=>(x||'').trim()).filter(Boolean);
+            const postLinks=links.filter(link=>canonicalPostLink(link.url)===permalink);
+            rows.push({body:text,links,time:card.querySelector('abbr[data-utime]')?.getAttribute('data-utime')||card.querySelector('time[datetime]')?.getAttribute('datetime')||null,times:[...postLinks.flatMap(a=>[a.label,a.text]),...markers]});seen.add(permalink);
+            if(rows.length>=max)break;
+          }
+          return rows;
+        },{max:settings.max_posts_per_group,groupId:new URL(group.url).pathname.match(/^\/groups\/([^/]+)/)?.[1]||''});
         const readAt=Date.now();observed+=raw.length;
-        if(!raw.length)throw new Error('未识别到群组帖子，可能尚未加载或页面结构已变化；不能将读取失败当作零结果');
+        if(!raw.length)throw new Error('未识别到带有稳定群组帖子链接和正文的帖子；页面内容可能尚未加载或 Facebook 页面结构已变化，不能将读取失败当作零结果');
         unreadableTime+=raw.filter(row=>!proactivePublishedAt(row,readAt)).length;
         found.push(...normalizeProactiveResults(raw,group,settings.lookback_hours,readAt));
       }
@@ -362,9 +379,9 @@ export function parseFacebookPostTime(value,now=Date.now()){
 }
 function proactivePublishedAt(row,now){return [row.time,...(row.times||[])].map(value=>parseFacebookPostTime(value,now)).find(Boolean)||null;}
 export function normalizeProactiveResults(rows,group,lookbackHours=24,now=Date.now()){
-  const seen=new Set(),groupPath=new URL(group.url).pathname.replace(/\/$/,''),cutoff=now-lookbackHours*3600000;
+  const seen=new Set(),cutoff=now-lookbackHours*3600000;
   return rows.flatMap(row=>{
-    const link=(row.links||[]).map(x=>String(x.url||'')).find(value=>{try{const path=new URL(value).pathname;return path.startsWith(groupPath+'/posts/')||path.startsWith(groupPath+'/permalink/');}catch{return false}});
+    const link=(row.links||[]).map(x=>String(x.url||'')).find(value=>{try{canonicalGroupPostUrl(value,group.url);return true}catch{return false}});
     if(!link)return [];
     let permalink;try{permalink=canonicalGroupPostUrl(link,group.url)}catch{return []}
     const externalId=new URL(permalink).pathname.match(/\/posts\/(\d+)/)?.[1],body=normalize(row.body),publishedAt=proactivePublishedAt(row,now);
