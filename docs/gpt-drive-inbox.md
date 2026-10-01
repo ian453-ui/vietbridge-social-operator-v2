@@ -28,3 +28,11 @@ Upload images first and `submission.json` last into a new child folder. Cloud wo
 GPT review is accessible before Facebook account setup. A library read failure displays a library error while preserving the page, allowing configuration and refresh to continue. Publication still requires its separate authorization.
 
 Task `VB-PUBLISHER-AUTO-RECOGNITION-20261001-001`: the real Drive diagnostic package `TEST-GPT-CLOUD-20261001-001` was uploaded and downloaded byte-for-byte, then recognized by the unmodified V2 inbox parser as `PENDING_REVIEW`, `ready=false`. This proves cloud storage and parser recognition; Mac sync, the running V2 review UI, and the complete end-to-end deployment remain unverified. No approval, import, scheduling or platform publication was performed.
+
+## Latest GPT draft updates
+
+The review panel checks the accessible inbox every 20 seconds while the Groups page is visible. “检查并更新” runs the same forced read immediately and reports the last successful check or a retryable error. This reads synced/retrieved ordinary files; it does not read ChatGPT conversations directly or download Drive without an authorized connector.
+
+Keep `content_id` stable for draft revisions and add an integer `revision_number` (1, 2, 3…). Separate directories may contain revisions; only the highest number is shown. Do not use folder modification times as version ordering. For revision 2 and above, include `primary_image_sha256`, the lowercase SHA-256 of the intended image, so partial image synchronization remains blocked. Upload the image first and the JSON last. Six-field legacy submissions remain revision 1. Divergent duplicates at the same revision are blocked; identical copies are deduplicated. An invalid latest revision remains visible and does not silently fall back to an old draft.
+
+If the content ID was already approved, newer text or media is shown as `UPDATE_AVAILABLE` for inspection, while the approved library and existing frozen jobs remain unchanged. Updating the review display is not approval or publication. The existing library approval action still requires a new content ID.
