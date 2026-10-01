@@ -35,3 +35,13 @@ npm test
 ```
 
 The prototype keeps product lifecycle state separate from the proven Publisher-P0 execution state. Real integration stays disabled until the M0 review and mock QA are accepted.
+
+## Operating account execution preference
+
+The header's “运营账号” selector chooses the Facebook account for Groups and proactive interaction. In Accounts/Settings, “此运营账号的执行方式” saves `API` or `BROWSER` on that account. Switching accounts restores its preference; editing another account does not overwrite the selected account's form. Existing databases receive a nullable column and preserve legacy `FB_API_ENABLED` configuration until a preference is explicitly saved. An explicit browser choice never connects to the Page API adapter.
+
+The API option applies to the existing Facebook Page API operations. Joined-group discovery and group proactive interactions use the selected account's bound Chrome profile in either preference; this release has no Groups API adapter. Browser mode requires that profile to be running, logged in and independently identity-verified. Hosted cloud control-plane mode still requires a connected local executor and rejects proactive browser scans.
+
+Proactive scans support stable `posts` and `permalink` links and numeric, ISO, Chinese, Vietnamese and English relative publication times. Unknown dates are counted and remain excluded from writes; unreadable/empty feeds report a blocker rather than a successful empty scan. Fact-sensitive posts expose a human source-verification form. Action records show pending reconciliation separately from independently confirmed actions; unknown actions cannot be retried through the ordinary execution path.
+
+Validation in the isolated Cloud Codex workspace: 59 dependency-compatible regression tests passed. Full server/DOM-composer tests could not run because locked npm dependencies were unavailable and network installation was blocked. Real Mac Chrome / Facebook scanning and interaction readback remain pending. No live interaction or publication was performed by Cloud Codex.

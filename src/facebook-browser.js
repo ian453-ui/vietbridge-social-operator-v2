@@ -97,17 +97,24 @@ export class FacebookBrowser {
     this.activeProfiles.add(profile.id);let browser;
     try{
       const checked=await this.inspect(workspace,account.id);if(!checked.healthy)throw new Error(`Facebook 身份核验失败（${checked.blocker||'UNKNOWN'}），主动扫描已停止`);
-      let page;({browser,page}=await this.page(profile));const found=[];
+      let page;({browser,page}=await this.page(profile));const found=[];let observed=0,unreadableTime=0;
       for(const group of groups){
         await page.goto(group.url+'?sorting_setting=CHRONOLOGICAL',{waitUntil:'domcontentloaded',timeout:45000});await page.waitForTimeout(1200);
         await assertSafeFacebookPage(page,group.url);
         const actor=await currentActorName(page);if(!identityMatches(actor,checked.externalId,account))throw new Error('扫描过程中 Facebook 身份发生变化，已停止');
         await page.locator('div[role="article"]').first().waitFor({state:'visible',timeout:12000}).catch(()=>{});
-        const raw=await page.locator('div[role="article"]').evaluateAll((nodes,max)=>nodes.slice(0,max).map(node=>({body:(node.innerText||'').trim(),links:[...node.querySelectorAll('a[href]')].map(a=>({url:a.href,text:(a.textContent||'').trim()})),time:node.querySelector('abbr')?.getAttribute('data-utime')||node.querySelector('a[aria-label]')?.getAttribute('aria-label')||null})),settings.max_posts_per_group);
-        found.push(...normalizeProactiveResults(raw,group,settings.lookback_hours));
+        const raw=await page.locator('div[role="article"]').evaluateAll((nodes,max)=>nodes.slice(0,max).map(node=>{
+          const links=[...node.querySelectorAll('a[href]')].map(a=>({url:a.href,text:(a.textContent||'').trim(),label:a.getAttribute('aria-label')}));
+          const postLinks=links.filter(a=>/\/groups\/[^/]+\/(posts|permalink)\//.test(a.url));
+          return {body:(node.innerText||'').trim(),links,time:node.querySelector('abbr[data-utime]')?.getAttribute('data-utime')||node.querySelector('time[datetime]')?.getAttribute('datetime')||null,times:postLinks.flatMap(a=>[a.label,a.text]).filter(Boolean)};
+        }),settings.max_posts_per_group);
+        const readAt=Date.now();observed+=raw.length;
+        if(!raw.length)throw new Error('未识别到群组帖子，可能尚未加载或页面结构已变化；不能将读取失败当作零结果');
+        unreadableTime+=raw.filter(row=>!proactivePublishedAt(row,readAt)).length;
+        found.push(...normalizeProactiveResults(raw,group,settings.lookback_hours,readAt));
       }
       const stored=this.store.ingestEngagementPosts(workspace,account.id,found),ranked=this.store.rankedEngagementCandidates(workspace,account.id);
-      return {identity:checked.actualIdentity,groups:groups.length,scanned:found.length,candidates:ranked.length,items:ranked};
+      return {identity:checked.actualIdentity,groups:groups.length,observed,unreadableTime,scanned:found.length,candidates:ranked.length,items:ranked};
     }catch(error){if(/checkpoint|login challenge|temporarily blocked|suspicious activity|安全验证|访问受限/i.test(String(error)))this.store.saveProactiveSettings(workspace,{...settings,account_id:account.id,account_enabled:false});throw error}
     finally{await browser?.close().catch(()=>{});this.activeProfiles.delete(profile.id);}
   }
@@ -281,7 +288,7 @@ function normalize(x){return String(x||'').replace(/\s+/g,' ').trim();}
 export function profileIdFromUrl(value){try{const u=new URL(value);if(!/^(www\.)?facebook\.com$/.test(u.hostname))return null;return u.pathname==='/profile.php'?u.searchParams.get('id'):null;}catch{return null;}}
 export function identityMatches(name,id,account){return normalize(name)===normalize(account.expected_identity)&&Boolean(id)&&(!account.external_id||String(account.external_id)===String(id));}
 async function currentActorName(page){
-  const trigger=page.getByRole('button',{name:/^(Your profile|你的个人主页|你的个人资料|你的主页|账户|账号)$/i}).first();
+  const trigger=page.getByRole('button',{name:/^(Your profile|你的个人主页|你的个人资料|你的主页|账户|账号|Trang cá nhân của bạn|Hồ sơ của bạn|Tài khoản)$/i}).first();
   if(!await trigger.waitFor({state:'visible',timeout:15000}).then(()=>true).catch(()=>false))return '';
   const opened=await trigger.getAttribute('aria-expanded')!=='true';
   try{
@@ -339,8 +346,36 @@ export async function groupPostCandidates(page,groupUrl,body,author){
 }
 export function normalizeGroupLinks(links){const seen=new Set();return links.map(x=>({name:normalize(x.name),url:String(x.url).split(/[?#]/)[0].replace(/\/$/,'')})).filter(x=>{const m=x.url.match(/^https:\/\/(?:www\.)?facebook\.com\/groups\/([^/]+)$/);return x.name&&m&&!['joins','feed','discover','create','notifications','search','your_groups'].includes(m[1])&&!seen.has(x.url)&&seen.add(x.url);});}
 export function normalizeRadarResults(rows,group,topic,limit=10){const seen=new Set(),groupPath=new URL(group.url).pathname.replace(/\/$/,'');return rows.map(row=>{const link=(row.links||[]).map(x=>String(x.url||'').split('?')[0]).find(url=>{try{return new URL(url).pathname.startsWith(groupPath+'/posts/')}catch{return false}});if(!link)return null;const externalId=new URL(link).pathname.match(/\/posts\/([^/]+)/)?.[1],body=normalize(row.body),author=normalize((row.links||[]).find(x=>x.text&&!String(x.url).includes('/posts/'))?.text)||'Facebook 用户';return externalId&&body?{group_id:group.id,external_id:externalId,permalink:link,author,body:body.slice(0,4000),topic}:null}).filter(x=>x&&!seen.has(x.external_id)&&seen.add(x.external_id)).slice(0,Math.min(10,limit));}
-export function normalizeProactiveResults(rows,group,lookbackHours=24){const seen=new Set(),groupPath=new URL(group.url).pathname.replace(/\/$/,''),cutoff=Date.now()-lookbackHours*3600000;return rows.map(row=>{const link=(row.links||[]).map(x=>String(x.url||'')).find(value=>{try{return new URL(value).pathname.startsWith(groupPath+'/posts/')}catch{return false}});if(!link)return null;const url=new URL(link),externalId=url.pathname.match(/\/posts\/([^/]+)/)?.[1],body=normalize(row.body),author=normalize((row.links||[]).find(x=>x.text&&!String(x.url).includes('/posts/'))?.text)||'Facebook 用户',numeric=Number(row.time),publishedAt=Number.isFinite(numeric)&&numeric>1000000000?new Date(numeric*1000).toISOString():null;if(!publishedAt||Date.parse(publishedAt)<cutoff||Date.parse(publishedAt)>Date.now()+60000)return null;return externalId&&body?{group_id:group.id,external_id:externalId,permalink:`https://www.facebook.com${url.pathname.replace(/\/$/,'')}/`,author,body:body.slice(0,4000),published_at:publishedAt}:null}).filter(x=>x&&!seen.has(x.external_id)&&seen.add(x.external_id));}
-async function assertSafeFacebookPage(page,groupUrl){const target=new URL(groupUrl),current=new URL(page.url());if(current.hostname!==target.hostname||!current.pathname.startsWith(target.pathname))throw new Error('Facebook 未停留在授权群组，已停止');const body=await page.locator('body').innerText();if(/checkpoint|login challenge|temporarily blocked|suspicious activity|security check|安全验证|可疑活动|暂时封锁|访问受限/i.test(page.url()+' '+body))throw new Error('Facebook checkpoint 或访问限制，已暂停账号自动化');}
+export function parseFacebookPostTime(value,now=Date.now()){
+  const text=normalize(value).toLowerCase();if(!text)return null;
+  const numeric=Number(text);let timestamp;
+  if(/^\d{10,13}$/.test(text)&&Number.isFinite(numeric))timestamp=text.length<=10?numeric*1000:numeric;
+  else if(/^\d{4}-\d{2}-\d{2}t.*(?:z|[+-]\d{2}:?\d{2})$/i.test(text))timestamp=Date.parse(text);
+  else if(/^(just now|刚刚|剛剛|vừa xong)$/.test(text))timestamp=now;
+  else {
+    const relative=text.match(/^(\d+)\s*(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|days?|d|秒钟?|分鐘|分钟|小时|小時|天|giây|phút|giờ|ngày)(?:\s*(ago|前|trước))?$/i);
+    if(!relative)return null;
+    const unit=relative[2],seconds=/^(s|seconds?|secs?|秒钟?|giây)$/.test(unit)?1:/^(m|minutes?|mins?|分鐘|分钟|phút)$/.test(unit)?60:/^(h|hours?|hrs?|小时|小時|giờ)$/.test(unit)?3600:86400;
+    timestamp=now-Number(relative[1])*seconds*1000;
+  }
+  return Number.isFinite(timestamp)&&timestamp>0&&timestamp<=now+60000?new Date(timestamp).toISOString():null;
+}
+function proactivePublishedAt(row,now){return [row.time,...(row.times||[])].map(value=>parseFacebookPostTime(value,now)).find(Boolean)||null;}
+export function normalizeProactiveResults(rows,group,lookbackHours=24,now=Date.now()){
+  const seen=new Set(),groupPath=new URL(group.url).pathname.replace(/\/$/,''),cutoff=now-lookbackHours*3600000;
+  return rows.flatMap(row=>{
+    const link=(row.links||[]).map(x=>String(x.url||'')).find(value=>{try{const path=new URL(value).pathname;return path.startsWith(groupPath+'/posts/')||path.startsWith(groupPath+'/permalink/');}catch{return false}});
+    if(!link)return [];
+    let permalink;try{permalink=canonicalGroupPostUrl(link,group.url)}catch{return []}
+    const externalId=new URL(permalink).pathname.match(/\/posts\/(\d+)/)?.[1],body=normalize(row.body),publishedAt=proactivePublishedAt(row,now);
+    if(!publishedAt||Date.parse(publishedAt)<cutoff||!externalId||!body||seen.has(externalId))return [];
+    seen.add(externalId);
+    const author=normalize((row.links||[]).find(x=>x.text&&!/\/(posts|permalink)\//.test(String(x.url)))?.text)||'Facebook 用户';
+    return [{group_id:group.id,external_id:externalId,permalink,author,body:body.slice(0,4000),published_at:publishedAt}];
+  });
+}
+
+async function assertSafeFacebookPage(page,groupUrl){const target=new URL(groupUrl),current=new URL(page.url());if(!/^(www\.)?facebook\.com$/.test(current.hostname)||!(/^(www\.)?facebook\.com$/.test(target.hostname))||current.pathname.match(/^\/groups\/([^/]+)/)?.[1]!==target.pathname.match(/^\/groups\/([^/]+)/)?.[1])throw new Error('Facebook 未停留在授权群组，已停止');const body=await page.locator('body').innerText();if(/checkpoint|login challenge|temporarily blocked|suspicious activity|security check|安全验证|可疑活动|暂时封锁|访问受限/i.test(page.url()+' '+body))throw new Error('Facebook checkpoint 或访问限制，已暂停账号自动化');}
 function effectiveAction(action,settings){let out=action;if(out.includes('LIKE')&&!settings?.auto_like)out=out==='LIKE_AND_REPLY'?'REPLY_ONLY':'SKIP';if(out.includes('REPLY')&&!settings?.auto_reply)out=out==='LIKE_AND_REPLY'?'LIKE_ONLY':'SKIP';if(out==='SKIP')throw new Error('当前自动开关没有允许的动作');return out;}
 async function proactiveReadback(page,action,replyBody){let liked=true,replied=true;if(action.includes('LIKE')){const unlike=page.getByRole('button',{name:/^(Unlike|取消赞|Bỏ thích)$/i}).first();liked=Boolean(await unlike.count())}if(action.includes('REPLY')){const expected=normalize(replyBody);replied=await page.locator('div[role="article"]').evaluateAll((nodes,text)=>nodes.some(node=>(node.innerText||'').replace(/\s+/g,' ').includes(text)),expected)}return {readback_verified:liked&&replied,liked,replied,checked_at:new Date().toISOString(),method:'FRESH_POST_BROWSER_READBACK'};}
 function cdpReady(port){return new Promise(resolve=>{const req=request({host:'127.0.0.1',port,path:'/json/version',timeout:500},res=>{res.resume();resolve(res.statusCode===200)});req.on('error',()=>resolve(false));req.on('timeout',()=>{req.destroy();resolve(false)});req.end();});}
