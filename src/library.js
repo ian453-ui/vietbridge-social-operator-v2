@@ -8,10 +8,11 @@ import {readGptDriveInbox,approveGptDriveItem} from './gpt-drive-inbox.js';
 
 const digest=x=>createHash('sha256').update(typeof x==='string'?x:JSON.stringify(x)).digest('hex');
 export class GroupLibrary {
-  constructor(store,{roots,snapshotRoot,library}={}){
+  constructor(store,{roots,snapshotRoot,library,gptInboxBase}={}){
     this.store=store;
     const socialRoot=resolve(dirname(fileURLToPath(import.meta.url)),'../..'),drive=dirname(socialRoot);
     this.roots=(roots||[join(socialRoot,'Content-Library'),join(drive,'VietBridge-Enterprise-Training')]).map(resolvePath=>resolve(resolvePath));
+    this.gptInboxBase=gptInboxBase===undefined?(roots?null:join(homedir(),'My Drive/Codex/VietBridge-GPT-Inbox')):gptInboxBase;
     this.library=library||new ContentLibrary({roots:this.roots});
     this.cache=new Map();
     this.snapshotRoot=snapshotRoot||join(homedir(),'Library/Application Support/VietBridgeSocialOperatorV2/content-snapshots');
@@ -27,6 +28,7 @@ export class GroupLibrary {
     if(!rel||rel.startsWith('..')||rel.startsWith('/'))throw new Error('客户内容目录必须位于独立的 clients 资源库下');
     return root;
   }
+  inboxRoot(root){return this.gptInboxBase?join(this.gptInboxBase,basename(root)):join(root,'GPT-INBOX');}
   allowed(path){const real=realpathSync(path);if(!this.roots.some(root=>{if(!existsSync(root))return false;const rel=relative(realpathSync(root),real);return rel&&!rel.startsWith('..')&&!rel.startsWith('/');}))throw new Error('资料不在企业培训资料库内');return real;}
   items(workspace,{refresh=false}={}){
     this.authorize(workspace);
@@ -74,13 +76,13 @@ export class GroupLibrary {
       const qaReady=String(manifest.status||'')==='READY'&&String(entry.status||'')==='READY';
       return {key:digest([workspace,id]),revision:digest([source,assets.map(a=>a.sha256)]),articleId:id,version:'client-current',title:title||String(entry.title||id),contentType:'image_text',body:publicBody,assets,packageRoot:root,sourcePath:contentPath,sourceMtime:documentStat.mtimeMs,sourceSize:documentStat.size,manifestPath,manifestMtime:manifestStat.mtimeMs,ready:Boolean(publicBody&&hasCover&&!missingAssets.length&&qaReady),blockingReason:!qaReady?'内容包尚未标记 READY':!hasCover?'缺少主图引用':missingAssets.length?'清单引用的图片文件不存在':publicBody?'':'缺少已批准的 Facebook 公开正文'};
     });
-    return [...readGptDriveInbox(root,manifest),...approved];
+    return [...readGptDriveInbox(root,manifest,this.inboxRoot(root)),...approved];
   }
   approveGpt(workspace,key,revision){
     if(workspace==='ws-vietbridge')throw new Error('请先选择独立客户；默认企业资料库不接收 GPT Drive 投稿');
     const root=this.clientRoot(workspace),item=this.items(workspace,{refresh:true}).find(p=>p.key===key);
     if(!item||item.revision!==revision)throw new Error('待审核内容已变化，请刷新后重新查看');
-    const result=approveGptDriveItem(root,item);
+    const result=approveGptDriveItem(root,item,this.inboxRoot(root));
     this.cache.delete(workspace);
     this.store.event(workspace,'gpt_drive_content_approved',result);
     return result;

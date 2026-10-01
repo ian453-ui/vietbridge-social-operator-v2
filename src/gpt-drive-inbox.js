@@ -7,8 +7,8 @@ const within=(path,root)=>{const rel=relative(realpathSync(root),realpathSync(pa
 const contentId=value=>/^[A-Z][A-Z0-9-]{3,80}$/.test(String(value||''));
 const imageExt=new Set(['.png','.jpg','.jpeg','.webp']);
 
-export function readGptDriveInbox(root,manifest){
-  const inbox=join(root,'GPT-INBOX');
+export function readGptDriveInbox(root,manifest,inboxRoot){
+  const inbox=inboxRoot||join(root,'GPT-INBOX');
   if(!existsSync(inbox))return [];
   const existing=new Map((manifest.items||[]).map(item=>[item.content_id,item]));
   return readdirSync(inbox,{withFileTypes:true}).filter(entry=>entry.isDirectory()).flatMap(entry=>{
@@ -33,12 +33,12 @@ export function readGptDriveInbox(root,manifest){
   });
 }
 
-export function approveGptDriveItem(root,item){
+export function approveGptDriveItem(root,item,inboxRoot){
   if(item.reviewStatus!=='PENDING_REVIEW'||item.ready!==false)throw Error('该内容不能审核通过');
   const manifestPath=join(root,'publisher-manifest.json'),manifest=JSON.parse(readFileSync(manifestPath,'utf8'));
   if(manifest.status!=='READY'||!Array.isArray(manifest.items))throw Error('客户资料库清单尚未就绪');
   if((manifest.items||[]).some(entry=>entry.content_id===item.articleId))throw Error('内容编号已存在，不能覆盖原版本');
-  const current=readGptDriveInbox(root,manifest).find(entry=>entry.key===item.key);
+  const current=readGptDriveInbox(root,manifest,inboxRoot).find(entry=>entry.key===item.key);
   if(!current||current.revision!==item.revision)throw Error('Drive 内容已改变，请刷新后重新审核');
   const extension=extname(item.assets[0].path).toLowerCase(),assetName=`${item.articleId}_gpt_${item.revision.slice(0,12)}${extension}`;
   const assetRel=`READY/assets/${assetName}`,assetPath=join(root,assetRel),contentRel=`READY/content/${item.articleId}.md`,contentPath=join(root,contentRel);
