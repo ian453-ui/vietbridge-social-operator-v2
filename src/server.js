@@ -26,7 +26,7 @@ export function createApp(dbPath=join(runtime?.dataDir||join(homedir(),'Library/
   res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');
   if(cloud){
    res.setHeader('Content-Security-Policy',"default-src 'self'; object-src 'none'; frame-ancestors 'none'");
-   const localOnly=/^\/api\/(group-library|local\/pick-path)/.test(url.pathname)||req.method==='POST'&&/\/(profiles|accounts|library|inbox|group-jobs|reply-intents|posts|content)(\/|$)|\/radar\/search$|\/reserve$/.test(url.pathname);
+   const localOnly=/^\/api\/(group-library|local\/pick-path)/.test(url.pathname)||req.method==='POST'&&url.pathname.endsWith('/proactive/scan')||req.method==='POST'&&/\/(profiles|accounts|library|inbox|group-jobs|reply-intents|posts|content)(\/|$)|\/radar\/search$|\/reserve$/.test(url.pathname);
    if(localOnly)return send(res,409,{error:'云端执行器尚未连接，此操作暂不可用'});
    if(req.method==='GET'&&url.pathname==='/api/health')return send(res,200,{ok:true,mode:'cloud-control-plane',persistent:true,executionConnected:false});
   }

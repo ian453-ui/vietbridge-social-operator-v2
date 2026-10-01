@@ -11,25 +11,41 @@ export function readGptDriveInbox(root,manifest,inboxRoot){
   const inbox=inboxRoot||join(root,'GPT-INBOX');
   if(!existsSync(inbox))return [];
   const existing=new Map((manifest.items||[]).map(item=>[item.content_id,item]));
-  return readdirSync(inbox,{withFileTypes:true}).filter(entry=>entry.isDirectory()).flatMap(entry=>{
+  const candidates=readdirSync(inbox,{withFileTypes:true}).filter(entry=>entry.isDirectory()).flatMap(entry=>{
     const folder=join(inbox,entry.name),file=join(folder,'submission.json');
     if(!existsSync(file))return [];
+    let parsedId,revisionNumber=1;
     try{
       if(!within(folder,inbox)||!within(file,folder)||statSync(file).size>100000)throw Error('提交文件路径或大小无效');
       const source=readFileSync(file,'utf8'),submission=JSON.parse(source);
       if(submission.schema_version!==1||submission.status!=='READY_FOR_REVIEW')throw Error('提交状态或格式版本无效');
       const id=String(submission.content_id||''),title=String(submission.title||'').trim(),body=String(submission.facebook_caption||'').trim();
       if(!contentId(id)||!title||title.length>200||/[\r\n]/.test(title)||!body||body.length>20000||/Visual package only|Use the approved.*body|BODY_INFOGRAPHIC_PLACEHOLDER/i.test(body))throw Error('内容编号、标题或 Facebook 正文无效');
+      parsedId=id;
+      revisionNumber=submission.revision_number??1;
+      if(!Number.isSafeInteger(revisionNumber)||revisionNumber<1)throw Error('稿件版本号必须为正整数');
       const name=String(submission.primary_image||''),path=resolve(folder,name),ext=extname(name).toLowerCase();
       if(!name||!imageExt.has(ext)||!existsSync(path)||!within(path,folder))throw Error('主图缺失、格式不支持或不在提交目录内');
       const stat=statSync(path);if(!stat.isFile()||stat.size<100||stat.size>20000000)throw Error('主图大小无效');
       const imageHash=hash(readFileSync(path)),revision=hash(JSON.stringify([id,title,body,imageHash]));
-      if(existing.get(id)?.gpt_source_revision===revision)return [];
+      if((revisionNumber>1||submission.primary_image_sha256!==undefined)&&submission.primary_image_sha256!==imageHash)throw Error('新版主图尚未同步完成或校验失败');
       const collision=existing.has(id);
-      return [{key:hash([folder,id].join('|')),revision,articleId:id,version:'gpt-drive-'+revision.slice(0,12),title,contentType:'image_text',body,
+      return [{key:hash([folder,id].join('|')),revision,articleId:id,version:'gpt-drive-'+revision.slice(0,12),revisionNumber,title,contentType:'image_text',body,
         assets:[{path,role:'cover',size:stat.size,mtime:stat.mtimeMs,sha256:imageHash,revision:imageHash}],packageRoot:folder,
-        ready:false,reviewStatus:collision?'ID_CONFLICT':'PENDING_REVIEW',blockingReason:collision?'该内容编号已存在；为避免覆盖已发布版本，请使用新编号':'待您审核正文与主图',sourcePath:file}];
-    }catch(error){return [{key:hash(folder),revision:'invalid',articleId:entry.name,version:'gpt-drive-invalid',title:entry.name,contentType:'image_text',body:'',assets:[],packageRoot:folder,ready:false,reviewStatus:'INVALID',blockingReason:String(error.message||error)}];}
+        ready:false,reviewStatus:collision?'UPDATE_AVAILABLE':'PENDING_REVIEW',blockingReason:collision?'检测到新版；已入库版本与现有发布任务保持不变。如需作为新内容入库，请使用新编号':'待您审核正文与主图',sourcePath:file}];
+    }catch(error){return [{key:hash(folder),revision:'invalid',articleId:parsedId||entry.name,revisionNumber:Number.isSafeInteger(revisionNumber)&&revisionNumber>0?revisionNumber:Number.MAX_SAFE_INTEGER,version:'gpt-drive-invalid',title:entry.name,contentType:'image_text',body:'',assets:[],packageRoot:folder,ready:false,reviewStatus:'INVALID',blockingReason:String(error.message||error)}];}
+  });
+  const groups=new Map();
+  for(const item of candidates){const group=groups.get(item.articleId)||[];group.push(item);groups.set(item.articleId,group);}
+  return [...groups.values()].flatMap(group=>{
+    const latest=Math.max(...group.map(item=>item.revisionNumber));
+    const versions=group.filter(item=>item.revisionNumber===latest).sort((a,b)=>a.packageRoot.localeCompare(b.packageRoot));
+    const invalid=versions.find(item=>item.reviewStatus==='INVALID');
+    if(invalid)return [invalid];
+    const item=versions[0];
+    if(new Set(versions.map(row=>row.revision)).size>1)return [{...item,reviewStatus:'VERSION_CONFLICT',blockingReason:'同一版本号存在不同内容，请为新版增加 revision_number'}];
+    if(existing.get(item.articleId)?.gpt_source_revision===item.revision)return [];
+    return [item];
   });
 }
 

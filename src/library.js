@@ -12,7 +12,8 @@ export class GroupLibrary {
     this.store=store;
     const socialRoot=resolve(dirname(fileURLToPath(import.meta.url)),'../..'),drive=dirname(socialRoot);
     this.roots=(roots||[join(socialRoot,'Content-Library'),join(drive,'VietBridge-Enterprise-Training')]).map(resolvePath=>resolve(resolvePath));
-    this.gptInboxBase=gptInboxBase===undefined?(roots?null:join(homedir(),'My Drive/Codex/VietBridge-GPT-Inbox')):gptInboxBase;
+    this.gptInboxBase=gptInboxBase===undefined?(process.env.GPT_INBOX_BASE|| (roots?null:join(homedir(),'My Drive/Codex/VietBridge-GPT-Inbox'))):gptInboxBase;
+    if(this.gptInboxBase&&!this.gptInboxBase.startsWith('/'))throw new Error('GPT_INBOX_BASE 必须为绝对路径');
     this.library=library||new ContentLibrary({roots:this.roots});
     this.cache=new Map();
     this.snapshotRoot=snapshotRoot||join(homedir(),'Library/Application Support/VietBridgeSocialOperatorV2/content-snapshots');
