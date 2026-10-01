@@ -26,13 +26,15 @@ test('scan accepts permalink format, verifies host/group, filters old or unknown
  assert.equal(result[0].published_at,'2026-10-01T08:00:00.000Z');
  assert.equal(result[0].permalink,'https://www.facebook.com/groups/123/posts/456/');
  assert.equal(normalizeProactiveResults([{...row(null),times:['Alice','3 giờ']}],group,24,now).length,1);
+ const photo={...row('2 小时前'),links:[{url:'https://www.facebook.com/photo/?fbid=789&set=gm.456&idorvanity=123',text:''}]};
+ assert.equal(normalizeProactiveResults([photo],group,24,now)[0].permalink,'https://www.facebook.com/groups/123/posts/456/');
 });
-test('empty or unreadable group feed is an explicit blocker instead of successful zero scan',async()=>{
+test('empty group feed skeletons are an explicit blocker instead of successful zero scan',async()=>{
  const account={id:'a',profile_id:'p',expected_identity:'Actor',external_id:'123456'};
  const store={account:()=>account,proactiveSettings:()=>({enabled:true,global_enabled:true,account_enabled:true,max_posts_per_group:30}),db:{prepare:()=>({all:()=>[group]})}};
  const browser=new FacebookBrowser(store);browser.profile=()=>({id:'p'});
  browser.inspect=async()=>({healthy:true,externalId:'123456',actualIdentity:'Actor'});
- const page={goto:async()=>{},waitForTimeout:async()=>{},url:()=>group.url,getByRole:()=>({first(){return this},waitFor:async()=>{},getAttribute:async()=> 'true',locator(){return this},innerText:async()=> 'Actor'}),locator:selector=>selector==='body'?{innerText:async()=> 'Test group'}:{first(){return this},waitFor:async()=>{},evaluateAll:async()=>[]}};
+ const page={goto:async()=>{},waitForTimeout:async()=>{},url:()=>group.url,evaluate:async()=>[],getByRole:()=>({first(){return this},waitFor:async()=>{},getAttribute:async()=> 'true',locator(){return this},innerText:async()=> 'Actor'}),locator:selector=>selector==='body'?{innerText:async()=> 'Test group'}:{first(){return this},waitFor:async()=>{},evaluateAll:async()=>[]}};
  let closed=false;browser.page=async()=>({page,browser:{close:async()=>{closed=true}}});
  await assert.rejects(browser.scanProactiveEngagement('ws','a'),/不能将读取失败当作零结果/);
  assert.equal(closed,true);assert.equal(browser.activeProfiles.size,0);
