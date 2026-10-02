@@ -63,6 +63,7 @@ export function createApp(dbPath=join(runtime?.dataDir||join(homedir(),'Library/
    const ws=decodeURIComponent(url.pathname.match(/^\/api\/workspaces\/([^/]+)\//)?.[1]||'');
    if(url.pathname.endsWith('/library/import'))return send(res,201,{contents:library.import(ws,input.selections)});
    if(url.pathname.endsWith('/library/approve-gpt'))return send(res,200,library.approveGpt(ws,input.key,input.revision));
+   if(url.pathname.endsWith('/library/reject-gpt'))return send(res,200,library.rejectGpt(ws,input.key,input.revision,input.reason));
    if(url.pathname.endsWith('/profiles'))return send(res,200,store.saveProfile(ws,input));
    if(url.pathname.endsWith('/accounts/import-local'))return send(res,200,await importLocalAccount(input.config_url));
    if(url.pathname.endsWith('/accounts'))return send(res,200,store.saveAccount(ws,input));
