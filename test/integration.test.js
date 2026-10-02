@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import {chmodSync,mkdtempSync,writeFileSync} from 'node:fs';import {tmpdir} from 'node:os';import {dirname,join} from 'node:path';import {createApp} from '../src/server.js';
+import test from 'node:test';import assert from 'node:assert/strict';import {chmodSync,mkdtempSync,writeFileSync,mkdirSync,readFileSync} from 'node:fs';import {tmpdir} from 'node:os';import {dirname,join} from 'node:path';import {createApp} from '../src/server.js';
 test('HTTP persistence, isolation, approvals, duplicate prevention and recovery',async()=>{
  const path=join(mkdtempSync(join(tmpdir(),'smo-v2-')),'test.sqlite');let server,base,token;
  async function start(){server=createApp(path);await new Promise(r=>server.listen(0,'127.0.0.1',r));base='http://127.0.0.1:'+server.address().port;token=(await read()).token;}
@@ -41,4 +41,21 @@ test('Facebook Group API creates tenant-scoped profile, account, content and ind
 test('customer API creates and edits a workspace',async()=>{
  const path=join(mkdtempSync(join(tmpdir(),'smo-http-customer-')),'db.sqlite'),server=createApp(path);await new Promise(r=>server.listen(0,'127.0.0.1',r));const base=`http://127.0.0.1:${server.address().port}`;
  try{const state=await fetch(base+'/api/state').then(r=>r.json()),headers={'content-type':'application/json','x-local-token':state.token,origin:base};const call=async body=>{const r=await fetch(base+'/api/workspaces',{method:'POST',headers,body:JSON.stringify(body)});return {status:r.status,value:await r.json()}};const created=await call({name:'Client A',brand:'Brand A'});assert.equal(created.status,201);const edited=await call({...created.value,name:'Client B'});assert.equal(edited.status,200);assert.equal(edited.value.id,created.value.id);const isolated=await fetch(base+`/api/state?workspace=${created.value.id}`).then(r=>r.json());assert.equal(isolated.content.length,0);assert.equal(isolated.workspaces.find(x=>x.id===created.value.id).name,'Client B');}finally{await new Promise(r=>server.close(r))}
+});
+
+test('GPT inbox rejection endpoint persists a local decision without changing Drive source',async()=>{
+ const temp=mkdtempSync(join(tmpdir(),'smo-gpt-reject-http-')),dbPath=join(temp,'db.sqlite'),roots=join(temp,'library'),client=join(roots,'clients','lp'),inbox=join(client,'GPT-INBOX','draft'),server=createApp(dbPath,{library:{roots:[roots],snapshotRoot:join(temp,'snapshots')}});
+ mkdirSync(inbox,{recursive:true});mkdirSync(join(client,'READY','content'),{recursive:true});mkdirSync(join(client,'READY','assets'),{recursive:true});
+ writeFileSync(join(client,'publisher-manifest.json'),JSON.stringify({status:'READY',items:[]}));
+ const image=Buffer.alloc(512,9),imagePath=join(inbox,'cover.png'),submissionPath=join(inbox,'submission.json');writeFileSync(imagePath,image);writeFileSync(submissionPath,JSON.stringify({schema_version:1,status:'READY_FOR_REVIEW',content_id:'LP-FB-HTTP-001',title:'HTTP review',facebook_caption:'Pending body',primary_image:'cover.png'}));
+ const sourceBefore=readFileSync(submissionPath,'utf8');await new Promise(r=>server.listen(0,'127.0.0.1',r));const base=`http://127.0.0.1:${server.address().port}`;
+ try{
+  const state=await fetch(base+'/api/state').then(r=>r.json()),headers={'content-type':'application/json','x-local-token':state.token,origin:base};
+  const created=await fetch(base+'/api/workspaces',{method:'POST',headers,body:JSON.stringify({name:'LP',brand:'LP',content_root:client})}).then(r=>r.json());
+  const catalogue=()=>fetch(`${base}/api/group-library?workspace=${encodeURIComponent(created.id)}&refresh=1`).then(r=>r.json());
+  const [draft]=(await catalogue()).items;assert.equal(draft.reviewStatus,'PENDING_REVIEW');
+  const rejected=await fetch(`${base}/api/workspaces/${created.id}/library/reject-gpt`,{method:'POST',headers,body:JSON.stringify({key:draft.key,revision:draft.revision})});
+  assert.equal(rejected.status,200);assert.equal((await rejected.json()).status,'REJECTED');assert.equal((await catalogue()).items.length,0);
+  assert.equal(readFileSync(submissionPath,'utf8'),sourceBefore);assert.deepEqual(readFileSync(imagePath),image);
+ }finally{await new Promise(r=>server.close(r));}
 });

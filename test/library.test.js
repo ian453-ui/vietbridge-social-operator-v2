@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtempSync,writeFileSync,readFileSync,mkdirSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {createHash} from 'node:crypto';
 import {Store} from '../src/store.js';
 import {GroupLibrary} from '../src/library.js';
 import {ContentLibrary} from '../../Publisher-P0/src/content-library.ts';
@@ -88,5 +89,27 @@ test('GPT Drive submission appears for review and only explicit approval adds it
     const v1=new ContentLibrary({roots:[root]});assert.equal(v1.index().find(item=>item.articleId==='LP-FB-011')?.readiness,'READY');
     assert.equal(store.rows('group_jobs',workspace.id).length,0);
     assert.throws(()=>library.approveGpt(workspace.id,pending.key,pending.revision),/待审核内容已变化/);
+  }finally{store.close();}
+});
+
+test('rejecting a GPT Drive draft hides only that exact revision and preserves its source',()=>{
+  const root=mkdtempSync(join(tmpdir(),'v2-gpt-reject-')),client=join(root,'clients','lp'),content=join(client,'READY','content'),assets=join(client,'READY','assets'),inbox=join(client,'GPT-INBOX','draft-001');
+  mkdirSync(content,{recursive:true});mkdirSync(assets,{recursive:true});mkdirSync(inbox,{recursive:true});
+  writeFileSync(join(client,'publisher-manifest.json'),JSON.stringify({status:'READY',items:[]}));
+  const image=Buffer.alloc(512,7),submission=join(inbox,'submission.json'),imagePath=join(inbox,'cover.png');
+  writeFileSync(imagePath,image);
+  writeFileSync(submission,JSON.stringify({schema_version:1,status:'READY_FOR_REVIEW',content_id:'LP-FB-012',title:'Travel planning',facebook_caption:'Review this draft.',primary_image:'cover.png'}));
+  const original=readFileSync(submission,'utf8'),store=new Store(join(root,'db.sqlite'));
+  try{
+    const workspace=store.saveWorkspace({name:'LP',brand:'LP',content_root:client}),library=new GroupLibrary(store,{roots:[root],snapshotRoot:join(root,'snapshots')});
+    const [pending]=library.catalogue(workspace.id);assert.equal(pending.reviewStatus,'PENDING_REVIEW');
+    assert.throws(()=>library.rejectGpt(workspace.id,pending.key,'stale-revision'),/已变化/);
+    assert.equal(library.rejectGpt(workspace.id,pending.key,pending.revision).status,'REJECTED');
+    assert.equal(library.catalogue(workspace.id,'',true).length,0);
+    assert.equal(readFileSync(submission,'utf8'),original);assert.deepEqual(readFileSync(imagePath),image);
+    const restarted=new GroupLibrary(store,{roots:[root],snapshotRoot:join(root,'snapshots')});assert.equal(restarted.catalogue(workspace.id,'',true).length,0);
+    writeFileSync(submission,JSON.stringify({schema_version:1,status:'READY_FOR_REVIEW',content_id:'LP-FB-012',revision_number:2,title:'Travel planning',facebook_caption:'Revised draft.',primary_image:'cover.png',primary_image_sha256:createHash('sha256').update(image).digest('hex')}));
+    const [newRevision]=restarted.catalogue(workspace.id,'',true);assert.equal(newRevision.reviewStatus,'PENDING_REVIEW');assert.notEqual(newRevision.revision,pending.revision);
+    assert.equal(store.db.prepare("SELECT COUNT(*) AS count FROM events WHERE workspace=? AND event='gpt_drive_content_rejected'").get(workspace.id).count,1);
   }finally{store.close();}
 });

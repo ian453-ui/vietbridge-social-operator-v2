@@ -18,6 +18,7 @@ export class GroupLibrary {
     this.cache=new Map();
     this.snapshotRoot=snapshotRoot||join(homedir(),'Library/Application Support/VietBridgeSocialOperatorV2/content-snapshots');
     store.db.exec(`CREATE TABLE IF NOT EXISTS group_library_imports(content_id TEXT PRIMARY KEY,workspace TEXT NOT NULL,article_id TEXT NOT NULL,version TEXT NOT NULL,source_root TEXT NOT NULL,fingerprint TEXT NOT NULL,source_json TEXT NOT NULL,UNIQUE(workspace,fingerprint))`);
+    store.db.exec(`CREATE TABLE IF NOT EXISTS gpt_inbox_decisions(workspace TEXT NOT NULL,item_key TEXT NOT NULL,revision TEXT NOT NULL,decision TEXT NOT NULL,reason TEXT,decided_at TEXT NOT NULL,PRIMARY KEY(workspace,item_key,revision))`);
   }
   authorize(workspace){this.store.requireWorkspace(workspace);if(workspace==='ws-vietbridge')return;this.clientRoot(workspace);}
   clientRoot(workspace){
@@ -77,7 +78,10 @@ export class GroupLibrary {
       const qaReady=String(manifest.status||'')==='READY'&&String(entry.status||'')==='READY';
       return {key:digest([workspace,id]),revision:digest([source,assets.map(a=>a.sha256)]),articleId:id,version:'client-current',title:title||String(entry.title||id),contentType:'image_text',body:publicBody,assets,packageRoot:root,sourcePath:contentPath,sourceMtime:documentStat.mtimeMs,sourceSize:documentStat.size,manifestPath,manifestMtime:manifestStat.mtimeMs,ready:Boolean(publicBody&&hasCover&&!missingAssets.length&&qaReady),blockingReason:!qaReady?'内容包尚未标记 READY':!hasCover?'缺少主图引用':missingAssets.length?'清单引用的图片文件不存在':publicBody?'':'缺少已批准的 Facebook 公开正文'};
     });
-    return [...readGptDriveInbox(root,manifest,this.inboxRoot(root)),...approved];
+    const rejected=this.store.db.prepare("SELECT item_key,revision FROM gpt_inbox_decisions WHERE workspace=? AND decision='REJECTED'").all(workspace);
+    const rejectedKeys=new Set(rejected.map(item=>`${item.item_key}:${item.revision}`));
+    const inbox=readGptDriveInbox(root,manifest,this.inboxRoot(root)).filter(item=>!rejectedKeys.has(`${item.key}:${item.revision}`));
+    return [...inbox,...approved];
   }
   approveGpt(workspace,key,revision){
     if(workspace==='ws-vietbridge')throw new Error('请先选择独立客户；默认企业资料库不接收 GPT Drive 投稿');
@@ -87,6 +91,17 @@ export class GroupLibrary {
     this.cache.delete(workspace);
     this.store.event(workspace,'gpt_drive_content_approved',result);
     return result;
+  }
+  rejectGpt(workspace,key,revision,reason=''){
+    this.authorize(workspace);if(workspace==='ws-vietbridge')throw new Error('默认企业资料库不接收 GPT Drive 投稿');
+    const item=this.items(workspace,{refresh:true}).find(p=>p.key===key);
+    if(!item||item.revision!==revision)throw new Error('待审核内容已变化，请刷新后重新查看');
+    if(item.reviewStatus!=='PENDING_REVIEW'||item.ready!==false)throw new Error('该内容当前不能拒绝');
+    const note=String(reason||'').trim().slice(0,500),decidedAt=new Date().toISOString();
+    this.store.db.prepare(`INSERT INTO gpt_inbox_decisions(workspace,item_key,revision,decision,reason,decided_at) VALUES(?,?,?,'REJECTED',?,?) ON CONFLICT(workspace,item_key,revision) DO UPDATE SET decision='REJECTED',reason=excluded.reason,decided_at=excluded.decided_at`).run(workspace,item.key,item.revision,note||null,decidedAt);
+    this.store.event(workspace,'gpt_drive_content_rejected',{article_id:item.articleId,revision:item.revision,reason:note||null});
+    this.cache.delete(workspace);
+    return {article_id:item.articleId,revision:item.revision,status:'REJECTED'};
   }
   catalogue(workspace,query='',refresh=false){const q=String(query??'').toLowerCase().trim();return this.items(workspace,{refresh}).filter(p=>!q||`${p.articleId} ${p.title} ${p.body}`.toLowerCase().includes(q)).map(p=>({...p,assets:p.assets.map(a=>({name:basename(a.path),role:a.role,size:a.size,revision:a.revision,sourceDriveId:a.sourceDriveId}))}));}
   media(workspace,key,index,revision){const p=this.items(workspace).find(p=>p.key===key);if(!p||p.revision!==revision)throw new Error('资料版本已变化，请刷新资料库');const asset=p.assets[Number(index)];if(!asset)throw new Error('媒体不存在');return asset;}
