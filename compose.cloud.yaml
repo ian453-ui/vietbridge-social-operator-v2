@@ -4,7 +4,7 @@ services:
     restart: unless-stopped
     environment:
       PUBLISHER_MODE: cloud
-      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?Set HTTPS public origin}
+      PUBLIC_ORIGIN: https://publisher.vietbridge.one
       ADMIN_USER: ${ADMIN_USER:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set a random password of at least 24 characters}
       DATA_DIR: /data

@@ -7,13 +7,17 @@
 
 ## 启动
 
-配置 PUBLIC_ORIGIN=https://social.vietbridge.one、ADMIN_USER 和至少24字符的随机 ADMIN_PASSWORD。
+唯一对外入口为 https://publisher.vietbridge.one，V1 与 V2 共用此入口；不配置额外对外子域名。
+compose.cloud.yaml 已固定 PUBLIC_ORIGIN=https://publisher.vietbridge.one。
+配置 ADMIN_USER 和至少24字符的随机 ADMIN_PASSWORD；直接运行 Node 时也须设置同一 PUBLIC_ORIGIN。
 通过服务器环境提供密码，不提交到仓库。
 运行 docker compose -f compose.cloud.yaml up -d --build。
 
 使用 HTTPS 反向代理转发至 127.0.0.1:18082，并保留 Host 头。
 在代理上设置登录速率限制。容器端口只绑定服务器回环地址。
-DNS 未绑定前可用临时 HTTPS 域名，但 PUBLIC_ORIGIN 必须与访问域名一致。
+DNS 与 TLS 均配置在 publisher.vietbridge.one，PUBLIC_ORIGIN 必须与该访问域名一致。
+预发布使用本机或内部隔离环境，不增设对外临时域名。
+V1/V2 的本机端口仅供内部通信。若已有旧对外站点，上线验收时撤销其代理与 DNS 入口。
 
 浏览器通过 HTTP Basic 登录；密码只应通过 HTTPS 传输。
 所有页面、API 和健康检查均要求登录。
