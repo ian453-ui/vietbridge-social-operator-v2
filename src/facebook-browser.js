@@ -88,6 +88,33 @@ export class FacebookBrowser {
       return {identity:checked.actualIdentity,groups:groups.length,topics:topics.length,found:unique.length,stored:stored.length,candidates:candidates.length,limited:true};
     }finally{await browser?.close().catch(()=>{});this.activeProfiles.delete(profile.id);}
   }
+  async replyRadarCandidate(workspace,candidateId){
+    const candidate=this.store.engagementCandidate(workspace,candidateId),comment=this.store.comment(workspace,candidate.comment_id),radar=this.store.db.prepare('SELECT * FROM radar_posts WHERE workspace=? AND account_id=? AND external_id=?').get(workspace,candidate.account_id,comment.external_id);
+    if(!radar)throw new Error('候选没有可核验的群组帖子来源');
+    const account=this.store.account(workspace,candidate.account_id),profile=this.profile(workspace,account.profile_id),group=this.store.db.prepare('SELECT * FROM facebook_groups WHERE id=? AND workspace=? AND account_id=? AND enabled=1').get(radar.group_id,workspace,account.id);
+    if(!group)throw new Error('目标群组已停用或不属于当前账号');
+    const target=canonicalGroupPostUrl(radar.permalink,group.url);
+    if(this.activeProfiles.has(profile.id))throw new Error('该 Facebook 执行环境正在执行其他任务');
+    const policy=this.store.engagementPolicy(workspace,account.id);if(policy?.mode!=='AUTO_LOW_RISK')throw new Error('当前为影子模式，只生成候选，不会发送');
+    this.activeProfiles.add(profile.id);let browser,reservation,submitted=false;
+    try{
+      const checked=await this.inspect(workspace,account.id);if(!checked.healthy)throw new Error('Facebook 身份核验失败，主题回复已停止');
+      let page;({browser,page}=await this.page(profile));await page.goto(target,{waitUntil:'domcontentloaded',timeout:45000});await page.waitForTimeout(1000);await assertSafeFacebookPage(page,group.url);
+      if(canonicalGroupPostUrl(page.url(),group.url)!==target)throw new Error('未停留在目标帖子，已阻止回复');
+      if(!identityMatches(await currentActorName(page),checked.externalId,account))throw new Error('写入前 Facebook 身份发生变化');
+      const text=normalize(await page.locator('body').innerText());if(!text.includes(normalize(radar.body).slice(0,45)))throw new Error('目标帖子正文不匹配，已阻止回复');
+      if(text.includes(normalize(candidate.draft)))throw new Error('页面已有相同回复，须先人工核对，禁止重复发送');
+      const box=page.locator('[role="textbox"][contenteditable="true"]').last();if(!await box.count())throw new Error('未找到评论输入框，未发送');
+      reservation=this.store.reserveReplyQuota(workspace,candidate.id).reservation;
+      await box.fill(candidate.draft);if(normalize(await box.textContent())!==normalize(candidate.draft))throw new Error('回复正文完整性核对失败');
+      this.store.beginAutoReply(workspace,candidate.id,reservation.id);submitted=true;await box.press('Enter');await page.waitForTimeout(1500);
+      const fresh=await browser.contexts()[0].newPage();let evidence;
+      try{await fresh.goto(target,{waitUntil:'domcontentloaded',timeout:45000});await fresh.waitForTimeout(1200);await assertSafeFacebookPage(fresh,group.url);if(canonicalGroupPostUrl(fresh.url(),group.url)!==target)throw new Error('回读目标帖子不匹配');evidence=await radarReplyReadback(fresh,candidate.draft,checked.actualIdentity);}finally{await fresh.close().catch(()=>{})}
+      if(!evidence.readback_verified)throw new Error('回复已提交，但独立页面未确认，禁止重发');
+      return this.store.finishAutoReply(workspace,candidate.id,reservation.id,evidence);
+    }catch(error){if(reservation){if(submitted)return this.store.markAutoReplyUnknown(workspace,candidate.id,reservation.id,String(error));this.store.releaseQuota(workspace,reservation.id,'提交前失败：'+String(error));}throw error;}
+    finally{await browser?.close().catch(()=>{});this.activeProfiles.delete(profile.id);}
+  }
   async scanProactiveEngagement(workspace,accountId){
     const account=this.store.account(workspace,accountId),settings=this.store.proactiveSettings(workspace,account.id);
     if(!settings?.enabled||!settings.global_enabled||!settings.account_enabled)throw new Error('主动互动 GLOBAL 或 ACCOUNT 开关未开启');
@@ -362,7 +389,7 @@ export async function groupPostCandidates(page,groupUrl,body,author){
   return links;
 }
 export function normalizeGroupLinks(links){const seen=new Set();return links.map(x=>({name:normalize(x.name),url:String(x.url).split(/[?#]/)[0].replace(/\/$/,'')})).filter(x=>{const m=x.url.match(/^https:\/\/(?:www\.)?facebook\.com\/groups\/([^/]+)$/);return x.name&&m&&!['joins','feed','discover','create','notifications','search','your_groups'].includes(m[1])&&!seen.has(x.url)&&seen.add(x.url);});}
-export function normalizeRadarResults(rows,group,topic,limit=10){const seen=new Set(),groupPath=new URL(group.url).pathname.replace(/\/$/,'');return rows.map(row=>{const link=(row.links||[]).map(x=>String(x.url||'').split('?')[0]).find(url=>{try{return new URL(url).pathname.startsWith(groupPath+'/posts/')}catch{return false}});if(!link)return null;const externalId=new URL(link).pathname.match(/\/posts\/([^/]+)/)?.[1],body=normalize(row.body),author=normalize((row.links||[]).find(x=>x.text&&!String(x.url).includes('/posts/'))?.text)||'Facebook 用户';return externalId&&body?{group_id:group.id,external_id:externalId,permalink:link,author,body:body.slice(0,4000),topic}:null}).filter(x=>x&&!seen.has(x.external_id)&&seen.add(x.external_id)).slice(0,Math.min(10,limit));}
+export function normalizeRadarResults(rows,group,topic,limit=10){const seen=new Set();return rows.flatMap(row=>{const link=(row.links||[]).find(x=>{try{canonicalGroupPostUrl(x.url,group.url);return true}catch{return false}});if(!link)return [];const permalink=canonicalGroupPostUrl(link.url,group.url),externalId=new URL(permalink).pathname.match(/\/posts\/(\d+)/)?.[1],key=group.id+':'+externalId,body=normalize(row.body),author=normalize((row.links||[]).find(x=>x.text&&!/\/(posts|permalink)\//.test(String(x.url)))?.text)||'Facebook 用户';if(!externalId||!body||seen.has(key))return [];seen.add(key);return [{group_id:group.id,external_id:externalId,permalink,author,body:body.slice(0,4000),topic}] }).slice(0,Math.min(10,limit));}
 export function parseFacebookPostTime(value,now=Date.now()){
   const text=normalize(value).toLowerCase();if(!text)return null;
   const numeric=Number(text);let timestamp;
@@ -396,3 +423,14 @@ async function assertSafeFacebookPage(page,groupUrl){const target=new URL(groupU
 function effectiveAction(action,settings){let out=action;if(out.includes('LIKE')&&!settings?.auto_like)out=out==='LIKE_AND_REPLY'?'REPLY_ONLY':'SKIP';if(out.includes('REPLY')&&!settings?.auto_reply)out=out==='LIKE_AND_REPLY'?'LIKE_ONLY':'SKIP';if(out==='SKIP')throw new Error('当前自动开关没有允许的动作');return out;}
 async function proactiveReadback(page,action,replyBody){let liked=true,replied=true;if(action.includes('LIKE')){const unlike=page.getByRole('button',{name:/^(Unlike|取消赞|Bỏ thích)$/i}).first();liked=Boolean(await unlike.count())}if(action.includes('REPLY')){const expected=normalize(replyBody);replied=await page.locator('div[role="article"]').evaluateAll((nodes,text)=>nodes.some(node=>(node.innerText||'').replace(/\s+/g,' ').includes(text)),expected)}return {readback_verified:liked&&replied,liked,replied,checked_at:new Date().toISOString(),method:'FRESH_POST_BROWSER_READBACK'};}
 function cdpReady(port){return new Promise(resolve=>{const req=request({host:'127.0.0.1',port,path:'/json/version',timeout:500},res=>{res.resume();resolve(res.statusCode===200)});req.on('error',()=>resolve(false));req.on('timeout',()=>{req.destroy();resolve(false)});req.end();});}
+
+
+async function radarReplyReadback(page,replyBody,actor){
+ const verified=await page.locator('div[role="article"]').evaluateAll((nodes,{text,author})=>nodes.some(node=>{
+  const normalize=value=>String(value||'').replace(/\s+/g,' ').trim();
+  const authored=[...node.querySelectorAll('a[href]')].some(link=>normalize(link.innerText||link.textContent)===author);
+  const exact=[...node.querySelectorAll('[dir="auto"],p,span')].some(element=>normalize(element.innerText||element.textContent)===text);
+  return authored&&exact;
+ }),{text:normalize(replyBody),author:normalize(actor)});
+ return {readback_verified:verified,replied:verified,checked_at:new Date().toISOString(),method:'FRESH_POST_BROWSER_READBACK',author_verified:verified};
+}
