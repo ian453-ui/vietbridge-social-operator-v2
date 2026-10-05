@@ -13,17 +13,36 @@ const runtime=cloudRuntime();
 const GroupLibrary=runtime&&!runtime.executionConnected?null:(await import('./library.js')).GroupLibrary;
 import {FacebookEngagement,apiEnabled} from './facebook-engagement.js';
 import {PublicationVerifier} from './publication-verifier.js';
+import {PublisherIntegration,integrationOptions,validateIntegrationPaths,scopeFingerprint} from './publisher-integration.js';
 const root=dirname(fileURLToPath(import.meta.url));
 const execFileAsync=promisify(execFile);
 export function createApp(dbPath=join(runtime?.dataDir||join(homedir(),'Library/Application Support/VietBridgeSocialOperatorV2'),'mock.sqlite'),options={}){
+ const publisherOptions=options.publisher||integrationOptions();
+ if(publisherOptions)validateIntegrationPaths(dbPath,publisherOptions);
  const cloud=options.cloud||runtime,localExecution=!cloud||cloud.executionConnected===true;
  const store=new Store(dbPath),token=randomUUID(),facebook=new FacebookBrowser(store),engagement=new FacebookEngagement(store),library=localExecution?new GroupLibrary(store,options.library):null,verifier=new PublicationVerifier(options.verifier);
+ const publisher=publisherOptions?new PublisherIntegration(store,{...publisherOptions,operatorDbPath:dbPath}):null;
+ if(publisher)facebook.resources=publisher.resources;
  const server=createServer(async(req,res)=>{try{
-  const origin=cloud&&!(cloud.executionConnected&&/^127\.0\.0\.1:\d+$/.test(req.headers.host||''))?cloud.origin:`http://${req.headers.host}`;
-  if(cloud){if(req.headers.host!==cloud.host&&!(cloud.executionConnected&&/^127\.0\.0\.1:\d+$/.test(req.headers.host||'')))throw Error('无效主机');if(!authenticate(req,res,cloud))return;}
-  else if(!/^127\.0\.0\.1:\d+$/.test(req.headers.host||''))throw Error('无效主机');
+  const loopback=/^(127\.0\.0\.1|localhost):\d+$/.test(req.headers.host||'');
+  const origin=cloud&&!(cloud.executionConnected&&loopback)?cloud.origin:`http://${req.headers.host}`;
+  if(cloud){if(req.headers.host!==cloud.host&&!(cloud.executionConnected&&loopback))throw Error('无效主机');if(!authenticate(req,res,cloud))return;}
+  else if(!loopback)throw Error('无效主机');
   const url=new URL(req.url,origin);
+  const publisherContext=()=>publisher.context(url.searchParams.get('workspace')||'',url.searchParams.get('accountId')||'');
+  const requestVerifier=()=>publisher?new PublicationVerifier({scoped:true,fetch:(path,init)=>publisher.fetch(publisherContext(),path,init)}):verifier;
   res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');
+  if(req.method==='GET'&&url.pathname==='/api/publisher-integration'){
+   if(!publisher)return send(res,200,{enabled:false,error:'发布模块未配置'});
+   try{await publisher.ready;const c=publisherContext();return send(res,200,{enabled:true,ready:true,workspace:c.id,accountId:c.operatorAccountId,platforms:c.platforms,scopeFingerprint:scopeFingerprint(c),executionEnabled:publisherOptions.workerEnabled===true});}catch(e){return send(res,200,{enabled:true,ready:false,error:e.message});}
+  }
+  if(url.pathname==='/publisher'||url.pathname.startsWith('/publisher/')){
+   if(!publisher)return send(res,503,{error:'发布模块未配置'});
+   if(req.method!=='GET'&&req.method!=='HEAD'&&(req.headers.origin!==origin||req.headers['x-local-token']!==token))return send(res,403,{error:'统一入口请求验证失败'});
+   const nonce=randomUUID(),context={...publisherContext(),nonce};req.url=url.pathname.slice('/publisher'.length)+url.search;if(req.url.startsWith('?'))req.url='/'+req.url;if(!req.url)req.url='/';
+   res.setHeader('Content-Security-Policy',`default-src 'self'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'nonce-${nonce}'; img-src 'self' data:; object-src 'none'; frame-ancestors 'self'; base-uri 'none'`);
+   return await publisher.dispatch(req,res,context);
+  }
   if(cloud){
    res.setHeader('Content-Security-Policy',"default-src 'self'; object-src 'none'; frame-ancestors 'none'");
    const localOnly=/^\/api\/(group-library|local\/pick-path)/.test(url.pathname)||req.method==='POST'&&url.pathname.endsWith('/proactive/scan')||req.method==='POST'&&/\/(profiles|accounts|library|inbox|group-jobs|reply-intents|posts|content)(\/|$)|\/radar\/search$|\/reserve$/.test(url.pathname);
@@ -33,10 +52,10 @@ export function createApp(dbPath=join(runtime?.dataDir||join(homedir(),'Library/
   if(req.method==='GET'&&['/','/client.js','/group-filters.js','/styles.css'].includes(url.pathname)){
    const name=url.pathname==='/'?'index.html':url.pathname.slice(1);res.setHeader('Content-Type',name.endsWith('.js')?'text/javascript':name.endsWith('.css')?'text/css':'text/html');return res.end(await readFile(join(root,name)));
   }
-  if(req.method==='GET'&&url.pathname==='/api/state')return send(res,200,{...store.view(url.searchParams.get('workspace')),token});
+  if(req.method==='GET'&&url.pathname==='/api/state')return send(res,200,{...store.view(url.searchParams.get('workspace')),token,integrationAcceptance:Boolean(publisher&&publisherOptions.workerEnabled!==true)});
   if(req.method==='GET'&&url.pathname==='/api/facebook'){const view=store.facebookView(url.searchParams.get('workspace'));return send(res,200,{...view,runtimeMode:cloud?.mode||'local',executionConnected:localExecution,accounts:view.accounts.map(account=>({...account,api_enabled:apiEnabled(account)})),recommendedProfileDir:join(homedir(),'Library/Application Support/VietBridgeSocialOperatorV2/chrome-profiles',url.searchParams.get('workspace'))});}
-  if(req.method==='GET'&&url.pathname==='/api/publication-verification')return send(res,200,await verifier.list());
-  if(req.method==='GET'&&url.pathname==='/api/publication-verification/wechat-browser')return send(res,200,await verifier.wechatBrowserStatus());
+  if(req.method==='GET'&&url.pathname==='/api/publication-verification')return send(res,200,await requestVerifier().list());
+  if(req.method==='GET'&&url.pathname==='/api/publication-verification/wechat-browser')return send(res,200,await requestVerifier().wechatBrowserStatus());
   if(req.method==='GET'&&url.pathname==='/api/group-library')return send(res,200,{items:library.catalogue(url.searchParams.get('workspace'),url.searchParams.get('q'),url.searchParams.get('refresh')==='1')});
   if(req.method==='GET'&&url.pathname==='/api/group-library/media'){
    const asset=library.media(url.searchParams.get('workspace'),url.searchParams.get('key'),url.searchParams.get('index'),url.searchParams.get('revision'));
@@ -46,6 +65,7 @@ export function createApp(dbPath=join(runtime?.dataDir||join(homedir(),'Library/
   if(req.method==='GET'&&url.pathname==='/api/health')return send(res,200,{ok:true,version:'2.1.0-alpha.1',mode:'local-real-integration',persistent:true,v1Url:'http://127.0.0.1:17880/'});
   if(req.method==='POST'){
    if(req.headers.origin!==origin||req.headers['x-local-token']!==token||req.headers['content-type']!=='application/json')throw Error('本地请求验证失败，请刷新页面');
+   if(publisher&&publisherOptions.workerEnabled!==true&&(/\/group-jobs\/auto-publish$|\/group-jobs\/[^/]+\/prepare$|\/engagement\/candidates\/[^/]+\/reserve$|\/proactive\/posts\/[^/]+\/execute$/.test(url.pathname)))return send(res,409,{error:'验收模式不执行真实社媒提交；请使用只读扫描和任务预览'});
    let raw='';for await(const c of req){raw+=c;if(raw.length>100000)throw Error('请求过大');}const input=JSON.parse(raw||'{}');
    if(url.pathname==='/api/workspaces')return send(res,input.id?200:201,store.saveWorkspace(input));
    if(url.pathname==='/api/local/pick-path'){
@@ -54,10 +74,10 @@ export function createApp(dbPath=join(runtime?.dataDir||join(homedir(),'Library/
     try{const {stdout}=await execFileAsync('/usr/bin/osascript',['-e',script],{timeout:120000});return send(res,200,{path:stdout.trim().replace(/\/$/,'')});}
     catch(error){if(String(error.stderr||error.message).includes('-128'))throw Error('已取消文件选择');throw Error('本机文件选择器无法打开；请检查 Finder/自动化权限，或手工填写绝对路径');}
    }
-   if(url.pathname==='/api/publication-verification/verify')return send(res,200,await verifier.verify(String(input.job_id||'')));
-   if(url.pathname==='/api/publication-verification/refresh-platform')return send(res,200,await verifier.refreshPlatform(String(input.platform||''),String(input.article_id||'')));
-   if(url.pathname==='/api/publication-verification/wechat-browser/launch')return send(res,200,await verifier.launchWechatBrowser());
-   if(url.pathname==='/api/publication-verification/wechat-browser/read')return send(res,200,await verifier.readWechatBrowser());
+   if(url.pathname==='/api/publication-verification/verify')return send(res,200,await requestVerifier().verify(String(input.job_id||'')));
+   if(url.pathname==='/api/publication-verification/refresh-platform')return send(res,200,await requestVerifier().refreshPlatform(String(input.platform||''),String(input.article_id||'')));
+   if(url.pathname==='/api/publication-verification/wechat-browser/launch')return send(res,200,await requestVerifier().launchWechatBrowser());
+   if(url.pathname==='/api/publication-verification/wechat-browser/read')return send(res,200,await requestVerifier().readWechatBrowser());
    const m=url.pathname.match(/^\/api\/workspaces\/([^/]+)\/(tasks|content|comments)\/([^/]+)\/(\w+)$/);
    if(m)return send(res,200,store.command(m[1],m[2],m[3],m[4],input));
    const ws=decodeURIComponent(url.pathname.match(/^\/api\/workspaces\/([^/]+)\//)?.[1]||'');
@@ -95,9 +115,8 @@ export function createApp(dbPath=join(runtime?.dataDir||join(homedir(),'Library/
   }
   send(res,404,{error:'NOT_FOUND'});
  }catch(e){send(res,409,{error:e.message});}});
- server.on('close',()=>store.close());return server;
+ server.on('close',()=>{publisher?.close();store.close();});return server;
 }
 function send(res,status,x){res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(x));}
 async function importLocalAccount(value){const text=String(value||'').trim();if(!text)throw Error('请填写本地配置文件地址');if(/^[a-z][a-z0-9+.-]*:/i.test(text)&&!text.startsWith('file://'))throw Error('账号配置只允许本地文件地址');const requested=text.startsWith('file://')?fileURLToPath(text):text,path=await realpath(requested),info=await stat(path);if(!info.isFile())throw Error('本地账号配置地址不是文件');if(/\.(rtf|docx?)$/i.test(path))throw Error('富文本不能作为账号配置；请选择纯文本 .env 或 .json 文件');if((info.mode&0o077)!==0)throw Error('本地账号配置文件权限过宽，请设为仅当前用户可读写（600）');const raw=await readFile(path,'utf8');let data={};if(path.endsWith('.json'))data=JSON.parse(raw);else for(const line of raw.split(/\r?\n/)){const m=line.match(/^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=\s*(.*?)\s*$/);if(m)data[m[1]]=m[2].replace(/^(['"])(.*)\1$/,'$2')}if(!data.FB_PAGE_ID&&!data.FB_ACCOUNT_NAME&&!data.FB_PAGE_NAME)throw Error('配置文件没有可识别的 Facebook 账号字段');return {config_url:path,display_name:data.FB_ACCOUNT_NAME||data.FB_PAGE_NAME||'',expected_identity:data.FB_EXPECTED_IDENTITY||data.FB_PAGE_NAME||'',external_id:data.FB_PAGE_ID||''};}
 if(process.argv[1]===fileURLToPath(import.meta.url))createApp().listen(Number(process.env.PORT||17882),runtime&&!runtime.executionConnected?'0.0.0.0':'127.0.0.1',()=>console.log(runtime?.executionConnected?'VietBridge authenticated Mac Tunnel ready':runtime?'VietBridge cloud control plane ready':'V2 http://127.0.0.1:17882'));
-

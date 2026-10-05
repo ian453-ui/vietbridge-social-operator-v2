@@ -9,7 +9,7 @@ const execFileAsync=promisify(execFile);
 export class FacebookBrowser {
   constructor(store){this.store=store;this.processes=new Map();this.activeProfiles=new Set();this.manualWatchers=new Set();}
   async launch(workspace,profileId){const p=this.profile(workspace,profileId);if(await cdpReady(p.cdp_port)){if(!await portMatchesProfile(p))throw new Error('调试端口被另一个 Chrome 数据目录占用；请关闭旧窗口或更换端口，不能复用其他账号会话');await this.openFacebook(p);return {status:'READY',cdp_port:p.cdp_port};}const child=spawn(CHROME,[`--remote-debugging-port=${p.cdp_port}`,`--user-data-dir=${p.user_data_dir}`,'--no-first-run','https://www.facebook.com/groups/joins/'],{detached:true,stdio:'ignore'});child.unref();this.processes.set(profileId,child.pid);for(let i=0;i<30;i++){await new Promise(r=>setTimeout(r,250));if(await cdpReady(p.cdp_port)){if(!await portMatchesProfile(p))throw new Error('Chrome 已启动但端口与数据目录不匹配；已停止授权');this.store.db.prepare("UPDATE execution_profiles SET status='READY',last_error=NULL WHERE id=?").run(profileId);return {status:'READY',cdp_port:p.cdp_port};}}this.store.db.prepare("UPDATE execution_profiles SET status='BLOCKED',last_error='Chrome CDP 未就绪' WHERE id=?").run(profileId);throw new Error('Chrome 未能启动；请检查执行环境或手动关闭同目录的 Chrome');}
-  async openFacebook(profile){const {chromium}=await import('playwright-core');const browser=await chromium.connectOverCDP(`http://127.0.0.1:${profile.cdp_port}`,{noDefaults:true,timeout:15000});try{const context=browser.contexts()[0];if(!context)throw Error('Chrome 没有可连接的会话');const page=context.pages().find(p=>p.url().startsWith('https://www.facebook.com/'))||await context.newPage();if(!page.url().startsWith('https://www.facebook.com/'))await page.goto('https://www.facebook.com/',{waitUntil:'domcontentloaded',timeout:30000});await page.bringToFront();}finally{await browser.close();}}
+  async openFacebook(profile){const release=this.resources?.acquire(profile.user_data_dir,'operator:'+profile.id,()=>this.resourcePending(profile));let browser;try{const {chromium}=await import('playwright-core');browser=await chromium.connectOverCDP(`http://127.0.0.1:${profile.cdp_port}`,{noDefaults:true,timeout:15000});const context=browser.contexts()[0];if(!context)throw Error('Chrome 没有可连接的会话');const page=context.pages().find(p=>p.url().startsWith('https://www.facebook.com/'))||await context.newPage();if(!page.url().startsWith('https://www.facebook.com/'))await page.goto('https://www.facebook.com/',{waitUntil:'domcontentloaded',timeout:30000});await page.bringToFront();}finally{try{await browser?.close();}finally{release?.();}}}
   async inspect(workspace,accountId){
     const account=this.store.account(workspace,accountId),profile=this.profile(workspace,account.profile_id);
     const {browser,page}=await this.page(profile);
@@ -193,7 +193,7 @@ export class FacebookBrowser {
     if(this.manualWatchers.has(jobId))return;this.manualWatchers.add(jobId);
     const job=this.store.job(workspace,jobId),account=this.store.account(workspace,job.account_id),profile=this.profile(workspace,job.profile_id),group=this.store.db.prepare('SELECT * FROM facebook_groups WHERE id=? AND workspace=?').get(job.group_id,workspace),content=this.store.db.prepare('SELECT * FROM group_content WHERE id=? AND workspace=?').get(job.content_id,workspace);
     let browser;
-    try{const session=await this.page(profile);browser=session.browser;const page=session.page,deadline=Date.now()+180000;
+    try{const session=await this.page(profile,{reconcile:true});browser=session.browser;const page=session.page,deadline=Date.now()+180000;
       while(Date.now()<deadline&&this.store.job(workspace,jobId).state==='WAITING_FOR_USER'){
         if(page.url().startsWith(group.url)){
           const baseline=new Set(JSON.parse(this.store.job(workspace,jobId).evidence_json||'{}').preexisting_post_urls||[]);
@@ -212,7 +212,7 @@ export class FacebookBrowser {
     if(!['WAITING_FOR_USER','UNKNOWN','FAILED','PUBLISHED'].includes(job.state))throw new Error('当前任务尚未进入可核对状态');
     const account=this.store.account(workspace,job.account_id),profile=this.profile(workspace,job.profile_id),group=this.store.db.prepare('SELECT * FROM facebook_groups WHERE id=? AND workspace=?').get(job.group_id,workspace),content=this.store.db.prepare('SELECT * FROM group_content WHERE id=? AND workspace=?').get(job.content_id,workspace);
     let browser,page;
-    try{const session=await this.page(profile);browser=session.browser;page=await browser.contexts()[0].newPage();
+    try{const session=await this.page(profile,{reconcile:true});browser=session.browser;page=await browser.contexts()[0].newPage();
       let urls;
       if(suppliedUrl||job.post_url){
         const input=String(suppliedUrl||job.post_url).trim();
@@ -294,7 +294,14 @@ export class FacebookBrowser {
   }
   health(accountId,status,verified){this.store.db.prepare('UPDATE facebook_accounts SET session_health=?,identity_verified_at=? WHERE id=?').run(status,verified?new Date().toISOString():null,accountId);}
   profile(workspace,id){return this.store.db.prepare('SELECT * FROM execution_profiles WHERE id=? AND workspace=?').get(id,workspace)||(()=>{throw new Error('执行环境不存在')})();}
-  async page(profile){if(!await cdpReady(profile.cdp_port))throw new Error('执行环境未连接，请到“账号与设置”启动 Chrome');if(!await portMatchesProfile(profile))throw Error('调试端口不属于当前客户的 Chrome 数据目录；已阻止跨账号操作');const {chromium}=await import('playwright-core');const browser=await chromium.connectOverCDP(`http://127.0.0.1:${profile.cdp_port}`,{noDefaults:true,timeout:15000});try{const context=browser.contexts()[0];if(!context)throw new Error('Chrome 没有可连接的会话');const page=context.pages().find(p=>/^https:\/\/(www\.)?facebook\.com\//.test(p.url()))||await context.newPage();await page.bringToFront();return {browser,page};}catch(error){await browser.close();throw error;}}
+  resourcePending(profile){
+    const group=this.store.db.prepare("SELECT 1 FROM group_jobs WHERE profile_id=? AND state IN ('UNKNOWN','PROCESSING','WAITING_FOR_USER') LIMIT 1").get(profile.id);
+    const action=this.store.db.prepare("SELECT 1 FROM engagement_actions e JOIN facebook_accounts a ON a.id=e.account_id AND a.workspace=e.workspace WHERE a.profile_id=? AND e.state IN ('ATTEMPTING','RECONCILE_PENDING') LIMIT 1").get(profile.id);
+    const reply=this.store.db.prepare("SELECT 1 FROM engagement_candidates e JOIN facebook_accounts a ON a.id=e.account_id AND a.workspace=e.workspace WHERE a.profile_id=? AND e.state IN ('SUBMITTING','UNKNOWN') LIMIT 1").get(profile.id);
+    return Boolean(group||action||reply);
+  }
+  async page(profile,{reconcile=false}={}){const release=this.resources?.acquire(profile.user_data_dir,'operator:'+profile.id,()=>this.resourcePending(profile),{reconcile});try{return await this.connectPage(profile,release);}catch(error){release?.();throw error;}}
+  async connectPage(profile,release){if(!await cdpReady(profile.cdp_port))throw new Error('执行环境未连接，请到“账号与设置”启动 Chrome');if(!await portMatchesProfile(profile))throw Error('调试端口不属于当前客户的 Chrome 数据目录；已阻止跨账号操作');const {chromium}=await import('playwright-core');const browser=await chromium.connectOverCDP(`http://127.0.0.1:${profile.cdp_port}`,{noDefaults:true,timeout:15000});const close=browser.close.bind(browser);browser.close=async()=>{try{return await close();}finally{release?.();}};try{const context=browser.contexts()[0];if(!context)throw new Error('Chrome 没有可连接的会话');const page=context.pages().find(p=>/^https:\/\/(www\.)?facebook\.com\//.test(p.url()))||await context.newPage();await page.bringToFront();return {browser,page};}catch(error){await browser.close();throw error;}}
 }
 export function postComposer(page){
   // Facebook nests a second role=dialog around the "Create post" heading.
