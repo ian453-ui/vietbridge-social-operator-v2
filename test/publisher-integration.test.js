@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtempSync,mkdirSync,writeFileSync,readFileSync,rmSync,chmodSync,existsSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
+import {request as httpRequest} from 'node:http';
 import {Readable} from 'node:stream';
 import {Store} from '../src/store.js';
 import {createApp} from '../src/server.js';
@@ -28,6 +29,7 @@ async function request(server,path,{method='GET',body,headers={}}={}){
  let status=200,text='';const responseHeaders={};const res={setHeader(k,v){responseHeaders[k.toLowerCase()]=v;},writeHead(s,h={}){status=s;Object.assign(responseHeaders,h);},end(b=''){text+=b;}};
  await server.listeners('request')[0](req,res);return {status,text,headers:responseHeaders,json:()=>JSON.parse(text)};
 }
+function socketRequest(server,path,{method='GET',body,headers={}}={}){return new Promise((resolve,reject)=>{const request=httpRequest({hostname:'127.0.0.1',port:server.address().port,path,method,headers},response=>{let text='';response.setEncoding('utf8');response.on('data',chunk=>text+=chunk);response.on('end',()=>resolve({status:response.statusCode,text,json:()=>JSON.parse(text)}));});request.on('error',reject);if(body!==undefined)request.write(body);request.end();});}
 const query='?workspace=ws-vietbridge&accountId=a';
 test('real V2 handler mounts real V1 dashboard and preserves public/localhost authentication',async()=>{
  const f=fixtures(),server=createApp(f.operatorDb,{cloud:f.cloud,publisher:f.publisher});
@@ -43,6 +45,19 @@ test('real V2 handler mounts real V1 dashboard and preserves public/localhost au
   const gate=await request(server,'/api/workspaces/ws-vietbridge/group-jobs/auto-publish',{method:'POST',body:{job_ids:[]},headers:{...auth,origin:f.cloud.origin,'content-type':'application/json','x-local-token':session.token}});
   assert.equal(gate.status,409);assert.match(gate.text,/验收模式/);
  }finally{server.emit('close');await new Promise(r=>setImmediate(r));rmSync(f.root,{recursive:true,force:true});}
+});
+test('socket HTTP accepts authenticated public and loopback hosts, rejects foreign host and CSRF',async()=>{
+ const f=fixtures(),server=createApp(f.operatorDb,{cloud:f.cloud,publisher:f.publisher});await new Promise(r=>server.listen(0,'127.0.0.1',r));
+ try{
+  const auth={host:f.cloud.host,authorization:'Basic '+Buffer.from(f.cloud.user+':'+f.cloud.password).toString('base64')};
+  assert.equal((await socketRequest(server,'/api/health',{headers:{host:f.cloud.host}})).status,401);
+  const publicHealth=await socketRequest(server,'/api/health',{headers:auth});assert.equal(publicHealth.status,200);assert.equal(publicHealth.json().executionConnected,true);
+  const v1Page=await socketRequest(server,'/publisher/'+query,{headers:auth});assert.equal(v1Page.status,200);assert.match(v1Page.text,/integrationSettings/);
+  const port=server.address().port;
+  assert.equal((await socketRequest(server,'/api/health',{headers:{...auth,host:`localhost:${port}`}})).status,200);
+  assert.equal((await socketRequest(server,'/api/health',{headers:{...auth,host:'second.example'}})).status,409);
+  assert.equal((await socketRequest(server,'/publisher/api/tasks/execute'+query,{method:'POST',headers:{...auth,origin:'https://attacker.example','content-type':'application/json','x-local-token':'invalid'},body:'{}'})).status,403);
+ }finally{await new Promise(r=>server.close(r));rmSync(f.root,{recursive:true,force:true});}
 });
 test('real scoped draft creation, internal verification, account fencing and restart retain provenance',async()=>{
  const f=fixtures();let server=createApp(f.operatorDb,{cloud:f.cloud,publisher:f.publisher});
