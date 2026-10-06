@@ -1,6 +1,6 @@
 ---
 name: publisher-browser
-version: 1.0.0
+version: 1.1.0
 description: Let dot operate the unified Publisher through its authenticated browser UI, with explicit account scope and verifiable task results.
 ---
 
@@ -24,7 +24,7 @@ For each operation require exact `workspace_id`, `account_id`, requested action 
 4. For browser publishing, choose `BROWSER` in `#unified-transport`, click `#unified-switch-transport`, wait for reload and verify the saved mode. API is also supported as a manual preference but needs an existing secure local configuration reference; never put token/password contents into any field.
 5. Import the approved cloud content snapshot through `#unified-content-form`. Same source/version must stay identical. Select its content ID in `#unified-content`. Verify preview/body/media before creating the task with `#unified-create`.
 6. Read the matching job in `#unified-jobs`; retain its exact ID, workspace, account, frozen mode, content hash and state. A click is not success evidence. Use authenticated scoped job readback to resolve ambiguous task creation; do not resend blindly.
-7. Only with explicit authorization to approve that content/task, inspect the frozen preview and use `[data-approve="<job_id>"]`. Approval currently means READY, not a Facebook publication. Do not claim published without independent platform readback.
+7. Only with explicit authorization to approve that content/task, inspect the frozen preview and use `[data-approve="<job_id>"]`. Approval means READY, not a platform submission. Do not claim published without independent platform readback.
 8. Check capabilities before submission. `submit_to_facebook.supported` reflects the deployment execution switch (off by default). When false, report execution disabled. When true and the user explicitly authorized this exact task, click its `[data-execute="<job_id>"]` control and confirm the frozen account/content/mode. Never bypass Publisher by opening Facebook to submit yourself. READY is not PUBLISHED. UNKNOWN requires `[data-reconcile="<job_id>"]` readback; never retry or change transport to resend. If a platform ID is requested, use independently obtained evidence, never invent one.
 9. For one-shot random group selection open `[data-route="groups"]`, enter a bounded count in `#random-group-count` and click `#random-select-groups`. Inspect the actual chosen groups; random selection does not imply authorization to post. Each random round replaces old checks; successful task creation clears group/content selection.
 
@@ -32,4 +32,10 @@ For each operation require exact `workspace_id`, `account_id`, requested action 
 
 Return exact task IDs and states with non-secret evidence. Clearly distinguish content imported, task created, task approved, submission accepted and independently confirmed publication. Never expose local credential values or browser session data. UNKNOWN/SUBMITTING/PROCESSING results require readback, not transport switching and retry. Facebook account restrictions, checkpoint or unexpected identity stop the action; a different transport is not a way to bypass them.
 
-Record blockers specifically: unavailable deployment, login required, missing account, invalid content/media, unsupported browser video, missing API configuration, unavailable executor or uncertain result. Real posting/liking/replying remains outside the current integration-test scope.
+Record blockers specifically: unavailable deployment, login required, missing account, invalid content/media, missing API configuration, unavailable executor or uncertain result. Real posting/liking/replying remains outside the current integration-test scope.
+
+## Unified platform and identity rules
+
+Facebook freezes `operatorActorId` (browser /me identity) and `targetPageId` (Business/Graph asset) separately. They may legitimately differ; never bind V2 to V1 or substitute one ID for the other. API/BROWSER remains a manual Facebook-only choice; other platforms use their configured executor. Confirm exact platform/title/body/tags/media before approval. Existing local config paths are references only; do not read secret contents.
+
+Xiaohongshu supports image or single video; WeChat Official Account writes drafts only (`DRAFT_WRITTEN`, never public publication); WeChat Channels uses its dedicated browser and may return `PUBLISHED_ID_PENDING` without a public link. `submit_platform_task.supported` is the runtime execution gate. All real uploads/submissions remain outside this integration-test authorization. Interrupted preparation with no final submission intent requires explicit human acknowledgment through the UI before return to review; already submitted UNKNOWN requires readback and cannot be reset this way.

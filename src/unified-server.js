@@ -12,6 +12,7 @@ if(existsSync(path)) {
   const db=new DatabaseSync(path,{readOnly:true});
   try {
     if(!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='publisher_jobs'").get())throw Error('此文件不是统一版本数据库，不能复用旧运行数据库');
+    if(!db.prepare("SELECT sql FROM sqlite_master WHERE name='publisher_jobs'").get().sql.includes('DRAFT_WRITTEN'))throw Error('此文件属于旧 Facebook 阶段 schema；请使用独立新目录，旧文件保留，不做原地迁移');
   } finally {db.close();}
 }
 if(cloudRuntime()?.mode!=='mac-tunnel')throw Error('统一入口需要已认证的 mac-tunnel 模式');

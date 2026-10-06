@@ -5,6 +5,8 @@ import {fileURLToPath} from 'node:url';
 import {readFileSync,statSync,realpathSync,mkdirSync,copyFileSync,existsSync} from 'node:fs';
 import {createHash} from 'node:crypto';
 import {readGptDriveInbox,approveGptDriveItem} from './gpt-drive-inbox.js';
+import {parseXhs} from './publisher-core/publication-payloads.ts';
+import {parse as parseYaml} from 'yaml';
 
 const digest=x=>createHash('sha256').update(typeof x==='string'?x:JSON.stringify(x)).digest('hex');
 export class GroupLibrary {
@@ -19,6 +21,7 @@ export class GroupLibrary {
     this.snapshotRoot=snapshotRoot||join(homedir(),'Library/Application Support/VietBridgeSocialOperatorV2/content-snapshots');
     store.db.exec(`CREATE TABLE IF NOT EXISTS group_library_imports(content_id TEXT PRIMARY KEY,workspace TEXT NOT NULL,article_id TEXT NOT NULL,version TEXT NOT NULL,source_root TEXT NOT NULL,fingerprint TEXT NOT NULL,source_json TEXT NOT NULL,UNIQUE(workspace,fingerprint))`);
     store.db.exec(`CREATE TABLE IF NOT EXISTS gpt_inbox_decisions(workspace TEXT NOT NULL,item_key TEXT NOT NULL,revision TEXT NOT NULL,decision TEXT NOT NULL,reason TEXT,decided_at TEXT NOT NULL,PRIMARY KEY(workspace,item_key,revision))`);
+    store.db.exec('CREATE TABLE IF NOT EXISTS publisher_content_variants(content_id TEXT NOT NULL,platform TEXT NOT NULL,payload_json TEXT NOT NULL,PRIMARY KEY(content_id,platform))');
   }
   enterprise(workspace){return workspace==='ws-vietbridge'||this.store.list('workspaces').find(w=>w.id===workspace)?.library_kind==='enterprise';}
   enterpriseRoot(workspace){const row=this.store.list('workspaces').find(w=>w.id===workspace),root=row?.content_root;if(!root||!existsSync(root))throw Error('自有企业资料库需要配置已同步的本机内容目录');const real=realpathSync(root);if(!this.roots.some(base=>existsSync(base)&&(()=>{const relativePath=relative(realpathSync(base),real);return !relativePath||!relativePath.startsWith('..')&&!relativePath.startsWith('/');})()))throw Error('企业资料库不在配置的内容根目录中');return real;}
@@ -54,8 +57,24 @@ export class GroupLibrary {
       // Selection includes completed Page material: group destination history
       // is independent and must not inherit V1 Page publication status.
       const metadata=assets.map(a=>{const path=this.allowed(a.path),s=statSync(path),sha256=createHash('sha256').update(readFileSync(path)).digest('hex');return {path,role:a.role,size:s.size,mtime:s.mtimeMs,sha256,revision:sha256,sourceDriveId:a.sourceDriveId};});
+      const platformPayloads={};
+      for(const platform of ['facebook','xiaohongshu','wechat_official_account','wechat_channels']){
+        if(!p.payloads[platform])continue;
+        if(!existsSync(p.payloads[platform])){platformPayloads[platform]={blockedReason:'平台文案文件尚未同步',media:[]};continue;}
+        const text=readFileSync(this.allowed(p.payloads[platform]),'utf8');
+        let payload={title:p.title,body:text,tags:[]};
+        if(['xiaohongshu','wechat_channels'].includes(platform)){const parsed=parseXhs(text);const declared=text.match(/^(?:title|标题)\s*[:：]\s*(.+)$/mu)?.[1];payload={title:declared?.trim()||p.title,...parsed};}
+        if(platform==='wechat_official_account'){
+          const front=text.match(/^---\r?\n([\s\S]*?)\r?\n---/),meta=front?parseYaml(front[1]):{};
+          payload={...payload,title:String(meta?.title||p.title),author:String(meta?.author||'驻越经营实录')};
+        }
+        const ids=p.variantAssets?.[platform];
+        const sourceAssets=ids?.length?p.assets.filter(a=>ids.includes(a.assetId)):p.assets.filter(a=>platform==='wechat_official_account'?['cover','gallery_image'].includes(a.role):p.contentType==='video'?a.role==='video':['cover','gallery_image'].includes(a.role));
+        platformPayloads[platform]={...payload,media:sourceAssets.sort((a,b)=>a.ordinal-b.ordinal).map(a=>this.allowed(a.path))};
+      }
+      const extraAssets=[...new Set(Object.values(platformPayloads).flatMap(p=>p.media))].filter(path=>!metadata.some(a=>a.path===path)).map(path=>{const s=statSync(path),sha256=createHash('sha256').update(readFileSync(path)).digest('hex');return {path,role:'platform_asset',size:s.size,mtime:s.mtimeMs,sha256,revision:sha256};});
       const key=digest([p.articleId,p.packageRoot,p.version]);
-      return [{key,revision:digest([body,metadata]),articleId:p.articleId,version:p.version,title:p.title,contentType:p.contentType,body,assets:metadata,packageRoot:p.packageRoot}];
+      return [{key,revision:digest([body,metadata,platformPayloads,extraAssets]),articleId:p.articleId,version:p.version,title:p.title,contentType:p.contentType,body,assets:metadata,extraAssets,platformPayloads,packageRoot:p.packageRoot}];
     });
     this.cache.set(workspace,{at:Date.now(),items});
     return items;
@@ -114,16 +133,18 @@ export class GroupLibrary {
     const all=this.items(workspace),chosen=selections.map(s=>{const p=all.find(p=>p.key===s.key);if(!p||p.revision!==s.revision)throw new Error('所选资料版本已变化，请刷新后重新预览');if(p.ready===false)throw new Error(p.articleId+'：'+p.blockingReason);return p;});
     if(new Set(chosen.map(p=>p.articleId)).size!==chosen.length)throw new Error('同一内容编号只能选择一个图文或视频版本');
     const frozen=chosen.map(p=>{
-      const assets=p.assets.map(a=>({...a,sha256:createHash('sha256').update(readFileSync(a.path)).digest('hex')}));
-      const fingerprint=digest([p.articleId,p.version,p.body,assets.map(a=>a.sha256)]);
+      const assets=[...p.assets,...(p.extraAssets||[])].map(a=>({...a,sha256:createHash('sha256').update(readFileSync(a.path)).digest('hex')}));
+      const fingerprint=digest([p.articleId,p.version,p.body,assets.map(a=>a.sha256),p.platformPayloads||{}]);
       const dir=join(this.snapshotRoot,fingerprint);mkdirSync(dir,{recursive:true});
       const media=assets.map((a,i)=>{const destination=join(dir,`${String(i+1).padStart(2,'0')}-${basename(a.path)}`);if(!existsSync(destination))copyFileSync(a.path,destination);if(createHash('sha256').update(readFileSync(destination)).digest('hex')!==a.sha256)throw new Error('冻结素材哈希不一致，已阻止导入');return destination;});
-      return {p,assets,fingerprint,media};
+      const platformPayloads=Object.fromEntries(Object.entries(p.platformPayloads||{}).map(([platform,payload])=>[platform,{...payload,body:payload.body?.replace(/(!\[[^\]]*\]\()<?([^)>\n]+)>?(\))/gu,(match,prefix,path,suffix)=>{const matches=assets.map((a,i)=>a.path===path||basename(a.path)===basename(path)?i:-1).filter(i=>i>=0);return matches.length===1?prefix+'<'+media[matches[0]]+'>'+suffix:match;}),media:payload.media.map(path=>media[assets.findIndex(a=>a.path===path)])}]));
+      return {p,assets,fingerprint,media:media.slice(0,p.assets.length),platformPayloads};
     });
-    return this.store.tx(()=>frozen.map(({p,assets,fingerprint,media})=>{
+    return this.store.tx(()=>frozen.map(({p,assets,fingerprint,media,platformPayloads})=>{
       const previous=this.store.db.prepare('SELECT content_id FROM group_library_imports WHERE workspace=? AND fingerprint=?').get(workspace,fingerprint);
       if(previous)return this.store.db.prepare('SELECT * FROM group_content WHERE id=? AND workspace=?').get(previous.content_id,workspace);
       const content=this.store.createContent(workspace,{title:`${p.articleId} · ${p.title} · ${p.version}`,body:p.body,media});
+      for(const [platform,payload] of Object.entries(platformPayloads))this.store.db.prepare('INSERT INTO publisher_content_variants VALUES(?,?,?)').run(content.id,platform,JSON.stringify(payload));
       this.store.db.prepare('INSERT INTO group_library_imports VALUES(?,?,?,?,?,?,?)').run(content.id,workspace,p.articleId,p.version,p.packageRoot,fingerprint,JSON.stringify({selection_revision:p.revision,assets}));
       this.store.event(workspace,'enterprise_library_imported',{content_id:content.id,article_id:p.articleId,version:p.version,fingerprint});
       return content;
@@ -132,6 +153,6 @@ export class GroupLibrary {
 }
 
 function cacheAssetsCurrent(items){
-  try{return items.every(item=>(!item.sourcePath||(()=>{const s=statSync(item.sourcePath);return s.size===item.sourceSize&&s.mtimeMs===item.sourceMtime;})())&&(!item.manifestPath||statSync(item.manifestPath).mtimeMs===item.manifestMtime)&&item.assets.every(asset=>{const s=statSync(asset.path);return s.size===asset.size&&s.mtimeMs===asset.mtime;}));}
+    try{return items.every(item=>(!item.sourcePath||(()=>{const s=statSync(item.sourcePath);return s.size===item.sourceSize&&s.mtimeMs===item.sourceMtime;})())&&(!item.manifestPath||statSync(item.manifestPath).mtimeMs===item.manifestMtime)&&[...item.assets,...(item.extraAssets||[])].every(asset=>{const s=statSync(asset.path);return s.size===asset.size&&s.mtimeMs===asset.mtime;}));}
   catch{return false;}
 }

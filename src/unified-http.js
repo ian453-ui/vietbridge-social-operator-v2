@@ -1,5 +1,11 @@
 /** Authenticated parent server calls this only after Host/auth/Origin/CSRF validation. */
 export function unifiedRoute(publisher, method, url, input={},executor=null) {
+  const preparation=url.pathname.match(/^\/api\/unified\/workspaces\/([^/]+)\/jobs\/([^/]+)\/resolve-preparation$/);
+  if(preparation){if(method!=='POST')return {status:405,body:{error:'METHOD_NOT_ALLOWED'}};if(!executor)throw Error('执行器未接入');return executor.resolvePreparation(decodeURIComponent(preparation[1]),decodeURIComponent(preparation[2]),input).then(body=>({status:200,body}));}
+  const inspect=url.pathname.match(/^\/api\/unified\/workspaces\/([^/]+)\/accounts\/([^/]+)\/inspect$/);
+  if(inspect){if(method!=='POST')return {status:405,body:{error:'METHOD_NOT_ALLOWED'}};if(!executor)throw Error('执行器未接入');return executor.inspectAccount(decodeURIComponent(inspect[1]),decodeURIComponent(inspect[2])).then(body=>({status:200,body}));}
+  const accounts=url.pathname.match(/^\/api\/unified\/workspaces\/([^/]+)\/accounts(?:\/(select))?$/);
+  if(accounts){const workspace=decodeURIComponent(accounts[1]);if(method==='GET'&&!accounts[2])return {status:200,body:publisher.accountsView(workspace)};if(method==='POST')return {status:accounts[2]?200:201,body:accounts[2]?publisher.selectAccount(workspace,input.id):publisher.saveAccount(workspace,input)};return {status:405,body:{error:'METHOD_NOT_ALLOWED'}};}
   const execute=url.pathname.match(/^\/api\/unified\/workspaces\/([^/]+)\/jobs\/([^/]+)\/(execute|reconcile|reopen)$/);
   if(execute){if(method!=='POST')return {status:405,body:{error:'METHOD_NOT_ALLOWED'}};if(!executor)throw Error('执行器未接入');return Promise.resolve(executor[execute[3]](decodeURIComponent(execute[1]),decodeURIComponent(execute[2]),input)).then(body=>({status:200,body}));}
   const transport=url.pathname.match(/^\/api\/unified\/workspaces\/([^/]+)\/accounts\/([^/]+)\/transport$/);

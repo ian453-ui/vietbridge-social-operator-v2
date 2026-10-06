@@ -15,7 +15,7 @@ function fixture(t) {
   const a=store.saveWorkspace({name:'LP'}),b=store.saveWorkspace({name:'VietBridge'});
   function account(ws,port,externalId,type='PAGE') {
     const profile=store.saveProfile(ws.id,{name:`Chrome ${port}`,cdp_port:port,user_data_dir:join(root,`chrome-${port}`)});
-    return publisher.saveAccount(ws.id,{display_name:`Page ${externalId}`,identity_type:type,external_id:externalId,profile_id:profile.id});
+    return publisher.saveAccount(ws.id,{display_name:`Page ${externalId}`,identity_type:type,external_id:externalId,operator_actor_id:externalId,target_page_id:externalId,profile_id:profile.id});
   }
   const first=account(a,19201,'10001'),second=account(a,19202,'10002'),other=account(b,19203,'10003');
   const input={source_id:'LP-011',revision:'cloud-r1',title:'标题',body:'来自云端账本的正文',media:['asset://lp/image1']};
@@ -157,4 +157,15 @@ test('native publisher view escapes content and has no version binding or iframe
   assert.ok(markup.includes('&lt;img'));
   assert.ok(!markup.includes('<iframe'));
   assert.ok(!markup.includes('publisherAccountId'));
+});
+test('independent actor and Page changes invalidate approval without rewriting frozen history',t=>{
+  const {store,publisher,a,first}=fixture(t);
+  publisher.saveAccount(a.id,{...first,operator_actor_id:first.external_id,target_page_id:'1459220443931651'});
+  const content=publisher.importContent(a.id,{source_id:'identity-regression',revision:'r1',title:'Identity',body:'Frozen identity content',media:[]});
+  const job=publisher.createPageJob(a.id,{account_id:first.id,content_id:content.id});
+  assert.equal(job.snapshot.operatorActorId,first.external_id);
+  assert.equal(job.snapshot.targetPageId,'1459220443931651');
+  store.db.prepare('UPDATE facebook_accounts SET target_page_id=? WHERE id=?').run('1459220443931652',first.id);
+  assert.throws(()=>publisher.approve(a.id,job.id,job.snapshot_hash),/目标 Page/);
+  assert.equal(publisher.job(a.id,job.id).snapshot.targetPageId,'1459220443931651');
 });

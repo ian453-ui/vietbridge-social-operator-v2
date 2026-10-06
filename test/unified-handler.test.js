@@ -23,7 +23,7 @@ test('unified production handler preserves auth and CSRF and creates scoped nati
     assert.equal((await request('/api/state',undefined,{...auth,host:'wrong.example'})).status,409);
     const state=(await request('/api/state')).json();assert.equal(state.unified,true);assert.deepEqual(state.workspaces,[]);
     assert.equal((await request('/api/health',undefined,{})).status,401);
-    const health=(await request('/api/health')).json();assert.equal(health.version,'2.2.0-alpha.1');assert.equal(health.mode,'publisher-unified');assert.equal(health.executionEnabled,false);
+    const health=(await request('/api/health')).json();assert.equal(health.version,'2.3.0-alpha.1');assert.equal(health.mode,'publisher-unified');assert.equal(health.executionEnabled,false);
     assert.equal((await request('/api/automation/capabilities',undefined,{})).status,401);
     const capability=(await request('/api/automation/capabilities')).json();
     assert.equal(capability.transport,'AUTHENTICATED_BROWSER_UI');
@@ -34,7 +34,7 @@ test('unified production handler preserves auth and CSRF and creates scoped nati
     const workspace=(await request('/api/workspaces',{name:'LP'},headers)).json();
     const base=`/api/workspaces/${workspace.id}`;
     const profile=(await request(base+'/profiles',{name:'LP Chrome',cdp_port:19221,user_data_dir:join(root,'chrome')},headers)).json();
-    const account=(await request(base+'/accounts',{display_name:'LP Page',identity_type:'PAGE',external_id:'10011',profile_id:profile.id},headers)).json();
+    const account=(await request(base+'/accounts',{display_name:'LP Page',identity_type:'PAGE',external_id:'10011',operator_actor_id:'10011',target_page_id:'20022',profile_id:profile.id},headers)).json();
     assert.equal(account.execution_transport,'BROWSER');
     const unified=`/api/unified/workspaces/${workspace.id}`;
     const content=(await request(unified+'/content',{source_id:'LP-011',revision:'r1',body:'cloud snapshot',media:[]},headers)).json();

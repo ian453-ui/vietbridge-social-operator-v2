@@ -1,6 +1,6 @@
 {
   "name": "vietbridge-social-operator-v2",
-  "version": "2.2.0-alpha.1",
+  "version": "2.3.0-alpha.1",
   "private": true,
   "type": "module",
   "engines": {

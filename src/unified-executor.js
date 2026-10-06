@@ -2,6 +2,7 @@ import {randomUUID,createHash} from 'node:crypto';
 import {realpathSync,statSync,existsSync,mkdirSync,copyFileSync,chmodSync} from 'node:fs';
 import {dirname,join,relative,extname} from 'node:path';
 import {hashFile} from './publisher-core/file-hash.ts';
+import {platformOf,guardedStates,terminalStates} from './publisher-platforms.js';
 
 const safeError=error=>String(error?.message||error).replace(/EAA[A-Za-z0-9_-]+|Bearer\s+\S+/g,'[REDACTED]').slice(0,800);
 const pending=new Set(['PREPARING','SUBMITTING','UNKNOWN']);
@@ -14,6 +15,7 @@ export class UnifiedExecutor {
     this.db.exec(`CREATE TABLE IF NOT EXISTS publisher_submit_intents(job_id TEXT PRIMARY KEY REFERENCES publisher_jobs(id),attempt_id TEXT NOT NULL,transport TEXT NOT NULL,snapshot_hash TEXT NOT NULL,prepared_json TEXT NOT NULL,created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS publisher_submit_receipts(job_id TEXT PRIMARY KEY REFERENCES publisher_jobs(id),platform_id TEXT NOT NULL,platform_url TEXT NOT NULL,evidence_json TEXT NOT NULL,created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS publisher_job_assets(job_id TEXT NOT NULL REFERENCES publisher_jobs(id),ordinal INTEGER NOT NULL,path TEXT NOT NULL,sha256 TEXT NOT NULL,size INTEGER NOT NULL,PRIMARY KEY(job_id,ordinal));`);
+    this.db.exec('CREATE TABLE IF NOT EXISTS publisher_prepare_intents(job_id TEXT PRIMARY KEY REFERENCES publisher_jobs(id),created_at TEXT NOT NULL)');
   }
   freezeMedia(job) {
     const old=this.db.prepare('SELECT * FROM publisher_job_assets WHERE job_id=? ORDER BY ordinal').all(job.id);
@@ -54,13 +56,33 @@ export class UnifiedExecutor {
     });
   }
   profilePending(profileId) {
-    return Boolean(this.db.prepare("SELECT 1 FROM publisher_jobs WHERE json_extract(snapshot_json,'$.profileId')=? AND state IN ('PREPARING','SUBMITTING','UNKNOWN') LIMIT 1").get(profileId));
+    return Boolean(this.db.prepare("SELECT 1 FROM publisher_jobs WHERE json_extract(snapshot_json,'$.profileId')=? AND state IN ('SUBMITTING','UNKNOWN') LIMIT 1").get(profileId));
+  }
+  acquireResources(snapshot,{reconcile=false}={}){
+    const held=[];
+    try{
+      // A shared MCP sidecar is a session resource even with distinct UI profiles.
+      if(snapshot.platform==='xiaohongshu'){
+        const endpoint=snapshot.options.mcp_endpoint,key=createHash('sha256').update(endpoint).digest('hex');
+        held.push(this.resources.acquire(join(this.resources.directory,'mcp-sessions',key),'xhs:'+endpoint,()=>Boolean(this.db.prepare("SELECT 1 FROM publisher_jobs WHERE json_extract(snapshot_json,'$.platform')='xiaohongshu' AND json_extract(snapshot_json,'$.options.mcp_endpoint')=? AND state IN ('SUBMITTING','UNKNOWN') LIMIT 1").get(endpoint)),{reconcile}));
+      }
+      held.push(this.resources.acquire(snapshot.profileDir,'operator:'+snapshot.profileId,()=>this.profilePending(snapshot.profileId)||this.drivers.pending?.(snapshot.profileId),{reconcile}));
+      return ()=>{for(const release of held.reverse())release();};
+    }catch(error){for(const release of held.reverse())release();throw error;}
+  }
+  async inspectAccount(workspace,id){
+    const {account,profile}=this.publisher.context(workspace,id);
+    const snapshot={workspace,accountId:id,platform:account.platform,operatorActorId:account.operator_actor_id,targetPageId:account.target_page_id,externalId:account.external_id,expectedIdentity:account.expected_identity,profileId:profile.id,profileDir:profile.user_data_dir,cdpPort:profile.cdp_port,transport:account.publisher_transport,credentialRef:account.config_url,options:account.publisher_options};
+    let release,driver;try{
+      release=this.acquireResources(snapshot,{reconcile:true});
+      driver=await this.drivers.create(snapshot);if(!driver.inspect)throw Error('只读预检未接入');return await driver.inspect();
+    }finally{try{await driver?.close();}finally{release?.();}}
   }
   claim(workspace,id) {
     return this.publisher.store.tx(()=>{
       const job=this.publisher.job(workspace,id);if(job.state!=='READY')throw Error('只有确认后的任务可执行；未知结果必须核对');
       this.publisher.assertCurrent(job);
-      const duplicate=this.db.prepare(`SELECT id FROM publisher_jobs WHERE workspace=? AND id<>? AND json_extract(snapshot_json,'$.externalId')=? AND json_extract(snapshot_json,'$.contentHash')=? AND state IN ('PREPARING','SUBMITTING','UNKNOWN','PUBLISHED') LIMIT 1`).get(workspace,id,job.snapshot.externalId,job.snapshot.contentHash);
+      const duplicate=this.db.prepare('SELECT snapshot_json,state FROM publisher_jobs WHERE workspace=? AND id<>?').all(workspace,id).find(row=>{const s=JSON.parse(row.snapshot_json);return guardedStates.includes(row.state)&&platformOf(s)===platformOf(job.snapshot)&&(platformOf(s)==='facebook'?(s.targetPageId||s.externalId):s.externalId)===(job.snapshot.targetPageId||job.snapshot.externalId)&&(s.payloadHash||s.contentHash)===(job.snapshot.payloadHash||job.snapshot.contentHash);});
       if(duplicate)throw Error('同一身份与内容已有提交或待核对任务，不能切换模式重发');
       this.db.prepare("UPDATE publisher_jobs SET state='PREPARING',attempt_id=?,updated_at=? WHERE id=? AND state='READY'").run(randomUUID(),new Date().toISOString(),id);
       return this.publisher.job(workspace,id);
@@ -74,13 +96,17 @@ export class UnifiedExecutor {
     try {
       job=this.claim(workspace,id);
       const resources=this.resources; if(!resources)throw Error('缺少统一浏览器互斥配置');
-      release=resources.acquire(job.snapshot.profileDir,'operator:'+profile,()=>this.profilePending(profile)||this.drivers.pending?.(profile));
+      release=this.acquireResources(job.snapshot);
       const assets=this.db.prepare('SELECT * FROM publisher_job_assets WHERE job_id=? ORDER BY ordinal').all(id);
       if(assets.length!==job.snapshot.media.length)throw Error('未保存批准时的媒体快照');
       for(const asset of assets)if(hashFile(asset.path).sha256!==asset.sha256)throw Error('已批准媒体发生变化');
       driver=await this.drivers.create(job.snapshot);
-      const prepared=await driver.prepare(job.snapshot,assets.map(x=>x.path));
+      const prepared=await driver.prepare(job.snapshot,assets.map(x=>x.path),()=>{
+        this.publisher.assertCurrent(job);
+        this.db.prepare('INSERT OR IGNORE INTO publisher_prepare_intents VALUES(?,?)').run(id,new Date().toISOString());
+      });
       this.publisher.assertCurrent(job);
+      for(const asset of assets)if(hashFile(asset.path).sha256!==asset.sha256)throw Error('准备期间已批准媒体发生变化，未最终提交');
       this.publisher.store.tx(()=>{
         this.db.prepare('INSERT INTO publisher_submit_intents VALUES(?,?,?,?,?,?)').run(id,job.attempt_id,job.snapshot.transport,job.snapshot_hash,JSON.stringify(prepared),new Date().toISOString());
         this.db.prepare("UPDATE publisher_jobs SET state='SUBMITTING',updated_at=? WHERE id=? AND state='PREPARING'").run(new Date().toISOString(),id);
@@ -90,7 +116,7 @@ export class UnifiedExecutor {
       const evidence=await driver.readback(job.snapshot,receipt);
       this.complete(workspace,id,evidence);
     } catch(error) {
-      if(job){const current=this.publisher.job(workspace,id);if(['PREPARING','SUBMITTING'].includes(current.state))this.db.prepare('UPDATE publisher_jobs SET state=?,evidence_json=?,updated_at=? WHERE id=?').run(current.state==='SUBMITTING'?'UNKNOWN':'BLOCKED',JSON.stringify({error:safeError(error)}),new Date().toISOString(),id);}
+      if(job){const current=this.publisher.job(workspace,id);if(['PREPARING','SUBMITTING'].includes(current.state))this.db.prepare('UPDATE publisher_jobs SET state=?,evidence_json=?,updated_at=? WHERE id=?').run(current.state==='SUBMITTING'||this.db.prepare('SELECT 1 FROM publisher_prepare_intents WHERE job_id=?').get(id)?'UNKNOWN':'BLOCKED',JSON.stringify({error:safeError(error),stage:current.state,submissionIntent:current.state==='SUBMITTING'}),new Date().toISOString(),id);}
       throw Error(safeError(error));
     } finally {
       try{await driver?.close();}finally{try{release?.();}finally{this.active.delete(profile);}}
@@ -100,18 +126,41 @@ export class UnifiedExecutor {
   complete(workspace,id,evidence) {
     const job=this.publisher.job(workspace,id);
     if(!['SUBMITTING','UNKNOWN'].includes(job.state))throw Error('任务不在可核对状态');
-    if(!evidence?.verified||!evidence.id||evidence.pageId!==job.snapshot.externalId||evidence.contentHash!==job.snapshot.contentHash)throw Error('没有完整的平台身份与内容回读证据');
-    this.db.prepare("UPDATE publisher_jobs SET state='PUBLISHED',evidence_json=?,updated_at=? WHERE id=?").run(JSON.stringify(evidence),new Date().toISOString(),id);
+    if(!this.db.prepare('SELECT 1 FROM publisher_submit_intents WHERE job_id=?').get(id))throw Error('准备阶段中断，未记录最终提交意图；不能标记已发布或重新提交');
+    const platform=platformOf(job.snapshot),outcome=evidence?.outcome||'PUBLISHED';
+    if(platform==='facebook'&&(!job.snapshot.operatorActorId||!job.snapshot.targetPageId))throw Error('旧任务缺少独立冻结身份，保留记录并人工核对');
+    if(!evidence?.verified||(platform==='facebook'?(evidence.targetPageId!==job.snapshot.targetPageId||evidence.operatorActorId!==job.snapshot.operatorActorId):(evidence.accountId||evidence.pageId)!==job.snapshot.externalId)||evidence.contentHash!==job.snapshot.contentHash||evidence.platform&&evidence.platform!==platform)throw Error('没有完整的平台身份与内容回读证据');
+    if(evidence.payloadHash&&evidence.payloadHash!==job.snapshot.payloadHash)throw Error('平台回读与冻结文案不一致');
+    if(platform!=='facebook'&&evidence.payloadHash!==job.snapshot.payloadHash)throw Error('缺少平台冻结文案回读证据');
+    if(platform==='wechat_official_account'&&(outcome!=='DRAFT_WRITTEN'||!evidence.id||evidence.formalPublication!==false))throw Error('公众号只能确认草稿，不能标记公开发表');
+    if(platform==='wechat_channels'&&(outcome!=='PUBLISHED_ID_PENDING'||!evidence.publicLinkUnavailable))throw Error('视频号缺少准确的列表回读状态');
+    if(!terminalStates.includes(outcome)||!evidence.id&&outcome!=='PUBLISHED_ID_PENDING')throw Error('没有作品 ID 或平台终态无效');
+    this.db.prepare('UPDATE publisher_jobs SET state=?,evidence_json=?,updated_at=? WHERE id=?').run(outcome,JSON.stringify(evidence),new Date().toISOString(),id);
+  }
+  async resolvePreparation(workspace,id,input={}){
+    const job=this.publisher.job(workspace,id);
+    if(job.state!=='UNKNOWN'||input.acknowledge_preparation_effects!==true||this.db.prepare('SELECT 1 FROM publisher_submit_intents WHERE job_id=?').get(id))throw Error('只能人工核对没有最终提交意图的准备中断；已提交结果必须平台回读');
+    if(this.active.has(job.snapshot.profileId))throw Error('准备进程仍在执行');
+    const release=this.acquireResources(job.snapshot,{reconcile:true});
+    try{
+      // Retain all uploads/assets/intent evidence; no platform deletion or automatic retry.
+      this.db.prepare("UPDATE publisher_jobs SET state='BLOCKED',evidence_json=?,updated_at=? WHERE id=?").run(JSON.stringify({...job.evidence,finalSubmissionNotCalled:true,preparationEffectsMayRemain:true,error:'确认未调用最终提交；准备上传可能残留。保留记录，仅在人工核对后重新审核。'}),new Date().toISOString(),id);
+      return this.publisher.job(workspace,id);
+    }finally{release();}
   }
   async reconcile(workspace,id,input={}) {
     const job=this.publisher.job(workspace,id);if(job.state!=='UNKNOWN')throw Error('任务当前不需要核对');
     if(this.active.has(job.snapshot.profileId))throw Error('该账号正在执行任务');
     this.active.add(job.snapshot.profileId);let driver,release;
     try {
-      release=this.resources.acquire(job.snapshot.profileDir,'operator:'+job.snapshot.profileId,()=>this.profilePending(job.snapshot.profileId)||this.drivers.pending?.(job.snapshot.profileId),{reconcile:true});
+      release=this.acquireResources(job.snapshot,{reconcile:true});
       driver=await this.drivers.create(job.snapshot);
+      const assets=this.db.prepare('SELECT * FROM publisher_job_assets WHERE job_id=? ORDER BY ordinal').all(id);
+      if(assets.length!==job.snapshot.media.length||assets.some(a=>hashFile(a.path).sha256!==a.sha256))throw Error('核对媒体快照不完整或已变化');
+      const intent=this.db.prepare('SELECT prepared_json FROM publisher_submit_intents WHERE job_id=?').get(id);
+      driver.restore?.(job.snapshot,assets.map(x=>x.path),intent?JSON.parse(intent.prepared_json):null);
       let receipt=this.db.prepare('SELECT platform_id AS id,platform_url AS url FROM publisher_submit_receipts WHERE job_id=?').get(id);
-      if(!receipt&&input.platform_id){if(!/^\d+(?:_\d+)?$/.test(String(input.platform_id)))throw Error('平台作品 ID 格式无效');receipt={id:String(input.platform_id),url:''};}
+      if(!receipt&&input.platform_id){if(!/^[A-Za-z0-9_-]{1,160}$/.test(String(input.platform_id)))throw Error('平台作品 ID 格式无效');receipt={id:String(input.platform_id),url:''};}
       this.complete(workspace,id,await driver.readback(job.snapshot,receipt));
       return this.publisher.job(workspace,id);
     }finally{try{await driver?.close();}finally{try{release?.();}finally{this.active.delete(job.snapshot.profileId);}}}
