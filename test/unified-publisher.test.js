@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtempSync,rmSync,writeFileSync} from 'node:fs';
+import {mkdtempSync,realpathSync,rmSync,writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {Store} from '../src/store.js';
@@ -98,7 +98,7 @@ test('manual API/browser switching affects new tasks and preserves the queued ex
   const config=join(path,'..','fixture.env');writeFileSync(config,'# disposable test configuration, no credentials\n',{mode:0o600});
   publisher.switchTransport(a.id,first.id,'API',config);
   assert.equal(publisher.context(a.id,first.id).account.execution_transport,'BROWSER','interaction remains browser-only');
-  const apiJob=create();assert.equal(apiJob.snapshot.transport,'API');assert.equal(apiJob.snapshot.credentialRef,config);
+  const apiJob=create();assert.equal(apiJob.snapshot.transport,'API');assert.equal(apiJob.snapshot.credentialRef,realpathSync(config));
   publisher.switchTransport(a.id,first.id,'BROWSER');
   assert.equal(publisher.job(a.id,apiJob.id).snapshot.transport,'API');
   assert.equal(publisher.job(a.id,browserJob.id).snapshot.transport,'BROWSER');
