@@ -2,7 +2,7 @@ import {readFileSync,existsSync,realpathSync,writeFileSync,renameSync,openSync,f
 import {isAbsolute,resolve,dirname} from 'node:path';
 import {Readable} from 'node:stream';
 import {createHash} from 'node:crypto';
-import {integrationContext} from '../../Publisher-P0/src/integration-context.ts';
+import {integrationContext} from './publisher-core/integration-context.ts';
 import {BrowserResources} from './browser-resources.js';
 export const scopeFingerprint=c=>createHash('sha256').update(JSON.stringify([c.id,c.operatorAccountId,c.publisherAccountId,c.contentRoot,[...c.platforms].sort()])).digest('hex');
 

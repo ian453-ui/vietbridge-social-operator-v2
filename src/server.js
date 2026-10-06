@@ -14,13 +14,30 @@ const GroupLibrary=runtime&&!runtime.executionConnected?null:(await import('./li
 import {FacebookEngagement,apiEnabled} from './facebook-engagement.js';
 import {PublicationVerifier} from './publication-verifier.js';
 import {PublisherIntegration,integrationOptions,validateIntegrationPaths,scopeFingerprint} from './publisher-integration.js';
+import {UnifiedPublisher} from './unified-publisher.js';
+import {unifiedRoute} from './unified-http.js';
+import {publisherAutomationCapabilities} from './publisher-automation.js';
+import {UnifiedExecutor} from './unified-executor.js';
+import {unifiedDrivers} from './unified-drivers.js';
+import {BrowserResources} from './browser-resources.js';
+import {ScanScheduler} from './scan-scheduler.js';
 const root=dirname(fileURLToPath(import.meta.url));
 const execFileAsync=promisify(execFile);
 export function createApp(dbPath=join(runtime?.dataDir||join(homedir(),'Library/Application Support/VietBridgeSocialOperatorV2'),'mock.sqlite'),options={}){
- const publisherOptions=options.publisher||integrationOptions();
+ const publisherOptions=options.unified?null:(options.publisher||integrationOptions());
  if(publisherOptions)validateIntegrationPaths(dbPath,publisherOptions);
  const cloud=options.cloud||runtime,localExecution=!cloud||cloud.executionConnected===true;
- const store=new Store(dbPath),token=randomUUID(),facebook=new FacebookBrowser(store),engagement=new FacebookEngagement(store),library=localExecution?new GroupLibrary(store,options.library):null,verifier=new PublicationVerifier(options.verifier);
+ const store=new Store(dbPath,{seedDemo:!options.unified}),token=randomUUID(),facebook=new FacebookBrowser(store),engagement=new FacebookEngagement(store),library=localExecution?new GroupLibrary(store,options.library):null,verifier=new PublicationVerifier(options.verifier);
+ const unified=options.unified?new UnifiedPublisher(store):null;
+ if(unified&&options.recoverStartup)unified.recoverAfterShutdown();
+ const executionEnabled=options.executionEnabled===true;
+ const executor=unified?new UnifiedExecutor(unified,{resources:options.resources||new BrowserResources(join(dirname(dbPath),'browser-resource-locks')),drivers:options.drivers||unifiedDrivers(facebook),enabled:executionEnabled,snapshotRoot:join(dirname(dbPath),'publisher-media-snapshots'),mediaRoots:job=>{
+  const workspace=store.list('workspaces').find(w=>w.id===job.workspace),roots=job.workspace==='ws-vietbridge'?(library?.roots||[]):workspace?.content_root?[workspace.content_root]:[];
+  const imported=library&&store.db.prepare('SELECT 1 FROM group_library_imports WHERE workspace=? AND content_id=?').get(job.workspace,job.content_id);
+  return imported?roots.concat(job.snapshot.media.map(path=>dirname(path))):roots;
+ }}):null;
+ if(unified)facebook.resources=executor.resources;
+ const scheduler=unified&&options.scanScheduler?new ScanScheduler(store,facebook).start():null;
  const publisher=publisherOptions?new PublisherIntegration(store,{...publisherOptions,operatorDbPath:dbPath}):null;
  if(publisher)facebook.resources=publisher.resources;
  const server=createServer(async(req,res)=>{try{
@@ -32,6 +49,8 @@ export function createApp(dbPath=join(runtime?.dataDir||join(homedir(),'Library/
   const publisherContext=()=>publisher.context(url.searchParams.get('workspace')||'',url.searchParams.get('accountId')||'');
   const requestVerifier=()=>publisher?new PublicationVerifier({scoped:true,fetch:(path,init)=>publisher.fetch(publisherContext(),path,init)}):verifier;
   res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');
+  if(unified&&req.method==='GET'&&url.pathname==='/api/health')return send(res,200,{ok:true,version:'2.2.0-alpha.1',mode:'publisher-unified',head:/^[a-f0-9]{40}$/.test(process.env.PUBLISHER_BUILD_HEAD||'')?process.env.PUBLISHER_BUILD_HEAD:null,executionEnabled,scanSchedulerEnabled:Boolean(scheduler),persistent:true});
+  if(unified&&req.method==='GET'&&url.pathname==='/api/automation/capabilities')return send(res,200,{...publisherAutomationCapabilities,operations:{...publisherAutomationCapabilities.operations,submit_to_facebook:{supported:executionEnabled,reason:executionEnabled?'requires approved task and explicit submit action':'acceptance mode; real submission disabled'}}});
   if(req.method==='GET'&&url.pathname==='/api/publisher-integration'){
    if(!publisher)return send(res,200,{enabled:false,error:'发布模块未配置'});
    try{await publisher.ready;const c=publisherContext();return send(res,200,{enabled:true,ready:true,workspace:c.id,accountId:c.operatorAccountId,platforms:c.platforms,scopeFingerprint:scopeFingerprint(c),executionEnabled:publisherOptions.workerEnabled===true});}catch(e){return send(res,200,{enabled:true,ready:false,error:e.message});}
@@ -49,11 +68,18 @@ export function createApp(dbPath=join(runtime?.dataDir||join(homedir(),'Library/
    if(localOnly&&!localExecution)return send(res,409,{error:'云端执行器尚未连接，此操作暂不可用'});
    if(req.method==='GET'&&url.pathname==='/api/health')return send(res,200,{ok:true,mode:localExecution?'mac-tunnel':'cloud-control-plane',persistent:true,executionConnected:localExecution});
   }
-  if(req.method==='GET'&&['/','/client.js','/group-filters.js','/styles.css'].includes(url.pathname)){
+  if(req.method==='GET'&&['/','/client.js','/unified-client.js','/group-selection.js','/group-filters.js','/styles.css'].includes(url.pathname)){
    const name=url.pathname==='/'?'index.html':url.pathname.slice(1);res.setHeader('Content-Type',name.endsWith('.js')?'text/javascript':name.endsWith('.css')?'text/css':'text/html');return res.end(await readFile(join(root,name)));
   }
-  if(req.method==='GET'&&url.pathname==='/api/state')return send(res,200,{...store.view(url.searchParams.get('workspace')),token,integrationAcceptance:Boolean(publisher&&publisherOptions.workerEnabled!==true)});
-  if(req.method==='GET'&&url.pathname==='/api/facebook'){const view=store.facebookView(url.searchParams.get('workspace'));return send(res,200,{...view,runtimeMode:cloud?.mode||'local',executionConnected:localExecution,accounts:view.accounts.map(account=>({...account,api_enabled:apiEnabled(account)})),recommendedProfileDir:join(homedir(),'Library/Application Support/VietBridgeSocialOperatorV2/chrome-profiles',url.searchParams.get('workspace'))});}
+  if(req.method==='GET'&&url.pathname==='/api/state')return send(res,200,{...store.view(url.searchParams.get('workspace')),token,unified:Boolean(unified),executionEnabled,integrationAcceptance:Boolean(unified&&!executionEnabled||publisher&&publisherOptions.workerEnabled!==true)});
+  if(unified&&req.method==='GET'&&url.pathname.startsWith('/api/unified/')){const result=await unifiedRoute(unified,req.method,url,{},executor);if(result)return send(res,result.status,result.body);}
+  if(req.method==='GET'&&url.pathname==='/api/facebook'){const view=store.facebookView(url.searchParams.get('workspace'));return send(res,200,{...view,sharedInteractionQuota:unified&&view.selectedAccountId?store.interactionBudget.status(url.searchParams.get('workspace'),view.selectedAccountId):null,runtimeMode:cloud?.mode||'local',executionConnected:localExecution,accounts:view.accounts.map(account=>({...account,api_enabled:apiEnabled(account)})),recommendedProfileDir:join(homedir(),'Library/Application Support/VietBridgeSocialOperatorV2/chrome-profiles',url.searchParams.get('workspace'))});}
+  if(unified&&url.pathname.startsWith('/api/publication-verification')){
+   if(req.method!=='GET')return send(res,409,{error:'统一版本的平台独立核对尚未接入，不会调用旧发布服务'});
+   if(url.pathname!=='/api/publication-verification')return send(res,200,{supported:false,reason:'此平台尚未接入统一版本'});
+   const rows=unified.list(url.searchParams.get('workspace')||'',url.searchParams.get('accountId')||null).map(job=>({job_id:job.id,article_id:job.content_id,title:job.snapshot.title,platform:'facebook',platform_name:'Facebook',account_id:job.account_id,local_state:job.state,verification_status:job.state==='PUBLISHED'?'VERIFIED_PUBLISHED':job.state==='UNKNOWN'?'RECONCILE_PENDING':'NOT_VERIFIED',label:job.state==='PUBLISHED'?'已确认发布':job.state==='UNKNOWN'?'待平台核对':'未核对',detail:'统一任务记录；只有独立平台回读才能确认发布',updated_at:job.updated_at,can_verify:false}));
+   return send(res,200,{rows,summary:{total:rows.length,published:rows.filter(x=>x.verification_status==='VERIFIED_PUBLISHED').length,drafts:0,pending:rows.filter(x=>x.verification_status==='RECONCILE_PENDING').length,not_published:0,deleted:0}});
+  }
   if(req.method==='GET'&&url.pathname==='/api/publication-verification')return send(res,200,await requestVerifier().list());
   if(req.method==='GET'&&url.pathname==='/api/publication-verification/wechat-browser')return send(res,200,await requestVerifier().wechatBrowserStatus());
   if(req.method==='GET'&&url.pathname==='/api/group-library')return send(res,200,{items:library.catalogue(url.searchParams.get('workspace'),url.searchParams.get('q'),url.searchParams.get('refresh')==='1')});
@@ -65,8 +91,9 @@ export function createApp(dbPath=join(runtime?.dataDir||join(homedir(),'Library/
   if(req.method==='GET'&&url.pathname==='/api/health')return send(res,200,{ok:true,version:'2.1.0-alpha.1',mode:'local-real-integration',persistent:true,v1Url:'http://127.0.0.1:17880/'});
   if(req.method==='POST'){
    if(req.headers.origin!==origin||req.headers['x-local-token']!==token||req.headers['content-type']!=='application/json')throw Error('本地请求验证失败，请刷新页面');
-   if(publisher&&publisherOptions.workerEnabled!==true&&(/\/group-jobs\/auto-publish$|\/group-jobs\/[^/]+\/prepare$|\/engagement\/candidates\/[^/]+\/reserve$|\/proactive\/posts\/[^/]+\/execute$/.test(url.pathname)))return send(res,409,{error:'验收模式不执行真实社媒提交；请使用只读扫描和任务预览'});
+   if((unified&&!executionEnabled||publisher&&publisherOptions.workerEnabled!==true)&&(/\/group-jobs\/auto-publish$|\/group-jobs\/[^/]+\/prepare$|\/engagement\/candidates\/[^/]+\/reserve$|\/proactive\/posts\/[^/]+\/execute$/.test(url.pathname)))return send(res,409,{error:'验收模式不执行真实社媒提交；请使用只读扫描和任务预览'});
    let raw='';for await(const c of req){raw+=c;if(raw.length>100000)throw Error('请求过大');}const input=JSON.parse(raw||'{}');
+   if(unified&&url.pathname.startsWith('/api/unified/')){const result=await unifiedRoute(unified,req.method,url,input,executor);if(result)return send(res,result.status,result.body);}
    if(url.pathname==='/api/workspaces')return send(res,input.id?200:201,store.saveWorkspace(input));
    if(url.pathname==='/api/local/pick-path'){
     const kind=String(input.kind||'');if(!['config','profile'].includes(kind))throw Error('无效的选择类型');
@@ -86,25 +113,26 @@ export function createApp(dbPath=join(runtime?.dataDir||join(homedir(),'Library/
    if(url.pathname.endsWith('/library/reject-gpt'))return send(res,200,library.rejectGpt(ws,input.key,input.revision,input.reason));
    if(url.pathname.endsWith('/profiles'))return send(res,200,store.saveProfile(ws,input));
    if(url.pathname.endsWith('/accounts/import-local'))return send(res,200,await importLocalAccount(input.config_url));
-   if(url.pathname.endsWith('/accounts'))return send(res,200,store.saveAccount(ws,input));
+   if(url.pathname.endsWith('/accounts'))return send(res,200,unified?unified.saveAccount(ws,input):store.saveAccount(ws,input));
    if(url.pathname.endsWith('/accounts/select'))return send(res,200,store.selectAccount(ws,input.id));
    if(url.pathname.endsWith('/groups/manual'))return send(res,200,store.addGroup(ws,input));
    if(url.pathname.endsWith('/content'))return send(res,200,store.createContent(ws,input));
    if(url.pathname.endsWith('/group-jobs'))return send(res,201,store.createGroupJobs(ws,input));
    if(url.pathname.endsWith('/group-jobs/auto-publish'))return send(res,202,facebook.enqueueJobs(ws,input.job_ids||[],{include:input.group_name_include,exclude:input.group_name_exclude}));
    if(url.pathname.endsWith('/reply-intents'))return send(res,201,store.createReplyIntent(ws,input.comment_id,input.body));
-   if(url.pathname.endsWith('/inbox/sync'))return send(res,200,await engagement.sync(ws,input.account_id));
+   if(url.pathname.endsWith('/inbox/sync'))return send(res,200,await (unified?facebook.syncBrowserInbox(ws,input.account_id):engagement.sync(ws,input.account_id)));
    if(url.pathname.endsWith('/engagement/policy'))return send(res,200,store.saveEngagementPolicy(ws,input));
    if(url.pathname.endsWith('/proactive/settings'))return send(res,200,store.saveProactiveSettings(ws,input));
    if(url.pathname.endsWith('/proactive/groups/toggle'))return send(res,200,store.setGroupProactive(ws,input.group_id,input.enabled));
    if(url.pathname.endsWith('/proactive/scan'))return send(res,200,await facebook.scanProactiveEngagement(ws,input.account_id));
    if(url.pathname.endsWith('/engagement/candidates/build'))return send(res,200,{candidates:store.buildEngagementCandidates(ws,input.account_id),quota:store.quotaStatus(ws,input.account_id)});
    if(url.pathname.endsWith('/engagement/radar/search'))return send(res,200,await facebook.searchGroupTopics(ws,input.account_id,input));
-   let quota=url.pathname.match(/^\/api\/workspaces\/([^/]+)\/engagement\/candidates\/([^/]+)\/reserve$/);if(quota){const workspace=decodeURIComponent(quota[1]),id=decodeURIComponent(quota[2]),candidate=store.engagementCandidate(workspace,id),comment=store.comment(workspace,candidate.comment_id),source=store.db.prepare('SELECT job_id FROM published_posts WHERE id=? AND workspace=?').get(comment.post_id,workspace);return send(res,200,source?.job_id.startsWith('radar-group:')?await facebook.replyRadarCandidate(workspace,id):await engagement.autoReply(workspace,id));}
+   let quota=url.pathname.match(/^\/api\/workspaces\/([^/]+)\/engagement\/candidates\/([^/]+)\/reserve$/);if(quota){const workspace=decodeURIComponent(quota[1]),id=decodeURIComponent(quota[2]),candidate=store.engagementCandidate(workspace,id),comment=store.comment(workspace,candidate.comment_id),source=store.db.prepare('SELECT job_id FROM published_posts WHERE id=? AND workspace=?').get(comment.post_id,workspace);return send(res,200,source?.job_id.startsWith('radar-group:')?await facebook.replyRadarCandidate(workspace,id):await (unified?facebook.replyInboxCandidate(workspace,id):engagement.autoReply(workspace,id)));}
+   const candidateReadback=url.pathname.match(/^\/api\/workspaces\/([^/]+)\/engagement\/candidates\/([^/]+)\/reconcile$/);if(candidateReadback)return send(res,200,await facebook.reconcileThemeReply(decodeURIComponent(candidateReadback[1]),decodeURIComponent(candidateReadback[2])));
    quota=url.pathname.match(/^\/api\/workspaces\/([^/]+)\/engagement\/reservations\/([^/]+)\/release$/);if(quota)return send(res,200,store.releaseQuota(decodeURIComponent(quota[1]),decodeURIComponent(quota[2]),input.reason));
    let proactive=url.pathname.match(/^\/api\/workspaces\/([^/]+)\/proactive\/posts\/([^/]+)\/execute$/);if(proactive)return send(res,200,await facebook.executeProactiveEngagement(decodeURIComponent(proactive[1]),decodeURIComponent(proactive[2]),input.reply_body));
    proactive=url.pathname.match(/^\/api\/workspaces\/([^/]+)\/proactive\/posts\/([^/]+)\/fact-sources$/);if(proactive)return send(res,200,store.addFactSource(decodeURIComponent(proactive[1]),decodeURIComponent(proactive[2]),input));
-   proactive=url.pathname.match(/^\/api\/workspaces\/([^/]+)\/proactive\/actions\/([^/]+)\/reconcile$/);if(proactive)return send(res,200,store.reconcileProactiveAction(decodeURIComponent(proactive[1]),decodeURIComponent(proactive[2]),input));
+   proactive=url.pathname.match(/^\/api\/workspaces\/([^/]+)\/proactive\/actions\/([^/]+)\/reconcile$/);if(proactive)return send(res,200,await facebook.reconcileProactiveBrowser(decodeURIComponent(proactive[1]),decodeURIComponent(proactive[2])));
    let reply=url.pathname.match(/^\/api\/workspaces\/([^/]+)\/reply-intents\/([^/]+)\/preflight$/);if(reply)return send(res,200,await engagement.preflightReply(decodeURIComponent(reply[1]),decodeURIComponent(reply[2])));
    let x=url.pathname.match(/^\/api\/workspaces\/([^/]+)\/profiles\/([^/]+)\/launch$/);if(x)return send(res,200,await facebook.launch(decodeURIComponent(x[1]),decodeURIComponent(x[2])));
    x=url.pathname.match(/^\/api\/workspaces\/([^/]+)\/accounts\/([^/]+)\/inspect$/);if(x)return send(res,200,await facebook.inspect(decodeURIComponent(x[1]),decodeURIComponent(x[2])));
@@ -115,7 +143,7 @@ export function createApp(dbPath=join(runtime?.dataDir||join(homedir(),'Library/
   }
   send(res,404,{error:'NOT_FOUND'});
  }catch(e){send(res,409,{error:e.message});}});
- server.on('close',()=>{publisher?.close();store.close();});return server;
+ server.on('close',()=>{const finish=()=>{publisher?.close();store.close();server.emit('storage-closed');};if(scheduler)scheduler.stop().then(finish);else finish();});return server;
 }
 function send(res,status,x){res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(x));}
 async function importLocalAccount(value){const text=String(value||'').trim();if(!text)throw Error('请填写本地配置文件地址');if(/^[a-z][a-z0-9+.-]*:/i.test(text)&&!text.startsWith('file://'))throw Error('账号配置只允许本地文件地址');const requested=text.startsWith('file://')?fileURLToPath(text):text,path=await realpath(requested),info=await stat(path);if(!info.isFile())throw Error('本地账号配置地址不是文件');if(/\.(rtf|docx?)$/i.test(path))throw Error('富文本不能作为账号配置；请选择纯文本 .env 或 .json 文件');if((info.mode&0o077)!==0)throw Error('本地账号配置文件权限过宽，请设为仅当前用户可读写（600）');const raw=await readFile(path,'utf8');let data={};if(path.endsWith('.json'))data=JSON.parse(raw);else for(const line of raw.split(/\r?\n/)){const m=line.match(/^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=\s*(.*?)\s*$/);if(m)data[m[1]]=m[2].replace(/^(['"])(.*)\1$/,'$2')}if(!data.FB_PAGE_ID&&!data.FB_ACCOUNT_NAME&&!data.FB_PAGE_NAME)throw Error('配置文件没有可识别的 Facebook 账号字段');return {config_url:path,display_name:data.FB_ACCOUNT_NAME||data.FB_PAGE_NAME||'',expected_identity:data.FB_EXPECTED_IDENTITY||data.FB_PAGE_NAME||'',external_id:data.FB_PAGE_ID||''};}

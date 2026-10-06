@@ -1,4 +1,4 @@
-import {ContentLibrary,clientPublicPayload} from '../../Publisher-P0/src/content-library.ts';
+import {ContentLibrary,clientPublicPayload} from './publisher-core/content-library.ts';
 import {homedir} from 'node:os';
 import {join,basename,resolve,relative,dirname} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -20,7 +20,9 @@ export class GroupLibrary {
     store.db.exec(`CREATE TABLE IF NOT EXISTS group_library_imports(content_id TEXT PRIMARY KEY,workspace TEXT NOT NULL,article_id TEXT NOT NULL,version TEXT NOT NULL,source_root TEXT NOT NULL,fingerprint TEXT NOT NULL,source_json TEXT NOT NULL,UNIQUE(workspace,fingerprint))`);
     store.db.exec(`CREATE TABLE IF NOT EXISTS gpt_inbox_decisions(workspace TEXT NOT NULL,item_key TEXT NOT NULL,revision TEXT NOT NULL,decision TEXT NOT NULL,reason TEXT,decided_at TEXT NOT NULL,PRIMARY KEY(workspace,item_key,revision))`);
   }
-  authorize(workspace){this.store.requireWorkspace(workspace);if(workspace==='ws-vietbridge')return;this.clientRoot(workspace);}
+  enterprise(workspace){return workspace==='ws-vietbridge'||this.store.list('workspaces').find(w=>w.id===workspace)?.library_kind==='enterprise';}
+  enterpriseRoot(workspace){const row=this.store.list('workspaces').find(w=>w.id===workspace),root=row?.content_root;if(!root||!existsSync(root))throw Error('自有企业资料库需要配置已同步的本机内容目录');const real=realpathSync(root);if(!this.roots.some(base=>existsSync(base)&&(()=>{const relativePath=relative(realpathSync(base),real);return !relativePath||!relativePath.startsWith('..')&&!relativePath.startsWith('/');})()))throw Error('企业资料库不在配置的内容根目录中');return real;}
+  authorize(workspace){this.store.requireWorkspace(workspace);if(this.enterprise(workspace)){if(workspace!=='ws-vietbridge')this.enterpriseRoot(workspace);return;}this.clientRoot(workspace);}
   clientRoot(workspace){
     const row=this.store.list('workspaces').find(w=>w.id===workspace);
     const configured=String(row?.content_root||'');
@@ -35,13 +37,15 @@ export class GroupLibrary {
   items(workspace,{refresh=false}={}){
     this.authorize(workspace);
     const cached=this.cache.get(workspace);
-    if(!refresh&&cached&&Date.now()-cached.at<(workspace==='ws-vietbridge'?300000:15000)&&cacheAssetsCurrent(cached.items))return cached.items;
-    if(workspace!=='ws-vietbridge'){
+    if(!refresh&&cached&&Date.now()-cached.at<(this.enterprise(workspace)?300000:15000)&&cacheAssetsCurrent(cached.items))return cached.items;
+    if(!this.enterprise(workspace)){
       const items=this.clientItems(workspace);
       this.cache.set(workspace,{at:Date.now(),items});
       return items;
     }
-    const items=this.library.index().flatMap(p=>{
+    const source=workspace==='ws-vietbridge'?this.library:new ContentLibrary({roots:[this.enterpriseRoot(workspace)]});
+    const items=source.index().flatMap(p=>{
+      if(this.roots.some(root=>{const rel=relative(join(root,'clients'),p.packageRoot);return !rel||!rel.startsWith('..')&&!rel.startsWith('/');}))return [];
       const payloadPath=p.payloads.facebook;
       const body=payloadPath?readFileSync(this.allowed(payloadPath),'utf8').trim():'';
       const videos=p.assets.filter(a=>a.role==='video');
@@ -84,7 +88,7 @@ export class GroupLibrary {
     return [...inbox,...approved];
   }
   approveGpt(workspace,key,revision){
-    if(workspace==='ws-vietbridge')throw new Error('请先选择独立客户；默认企业资料库不接收 GPT Drive 投稿');
+    if(this.enterprise(workspace))throw new Error('自有企业资料库采用已同步的正式内容；GPT 投稿请使用客户独立资料库');
     const root=this.clientRoot(workspace),item=this.items(workspace,{refresh:true}).find(p=>p.key===key);
     if(!item||item.revision!==revision)throw new Error('待审核内容已变化，请刷新后重新查看');
     const result=approveGptDriveItem(root,item,this.inboxRoot(root));
@@ -93,7 +97,7 @@ export class GroupLibrary {
     return result;
   }
   rejectGpt(workspace,key,revision,reason=''){
-    this.authorize(workspace);if(workspace==='ws-vietbridge')throw new Error('默认企业资料库不接收 GPT Drive 投稿');
+    this.authorize(workspace);if(this.enterprise(workspace))throw new Error('自有企业资料库采用已同步的正式内容');
     const item=this.items(workspace,{refresh:true}).find(p=>p.key===key);
     if(!item||item.revision!==revision)throw new Error('待审核内容已变化，请刷新后重新查看');
     if(item.reviewStatus!=='PENDING_REVIEW'||item.ready!==false)throw new Error('该内容当前不能拒绝');

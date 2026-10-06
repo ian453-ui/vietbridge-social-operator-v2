@@ -10,9 +10,9 @@ export class FacebookBrowser {
   constructor(store){this.store=store;this.processes=new Map();this.activeProfiles=new Set();this.manualWatchers=new Set();}
   async launch(workspace,profileId){const p=this.profile(workspace,profileId);if(await cdpReady(p.cdp_port)){if(!await portMatchesProfile(p))throw new Error('调试端口被另一个 Chrome 数据目录占用；请关闭旧窗口或更换端口，不能复用其他账号会话');await this.openFacebook(p);return {status:'READY',cdp_port:p.cdp_port};}const child=spawn(CHROME,[`--remote-debugging-port=${p.cdp_port}`,`--user-data-dir=${p.user_data_dir}`,'--no-first-run','https://www.facebook.com/groups/joins/'],{detached:true,stdio:'ignore'});child.unref();this.processes.set(profileId,child.pid);for(let i=0;i<30;i++){await new Promise(r=>setTimeout(r,250));if(await cdpReady(p.cdp_port)){if(!await portMatchesProfile(p))throw new Error('Chrome 已启动但端口与数据目录不匹配；已停止授权');this.store.db.prepare("UPDATE execution_profiles SET status='READY',last_error=NULL WHERE id=?").run(profileId);return {status:'READY',cdp_port:p.cdp_port};}}this.store.db.prepare("UPDATE execution_profiles SET status='BLOCKED',last_error='Chrome CDP 未就绪' WHERE id=?").run(profileId);throw new Error('Chrome 未能启动；请检查执行环境或手动关闭同目录的 Chrome');}
   async openFacebook(profile){const release=this.resources?.acquire(profile.user_data_dir,'operator:'+profile.id,()=>this.resourcePending(profile));let browser;try{const {chromium}=await import('playwright-core');browser=await chromium.connectOverCDP(`http://127.0.0.1:${profile.cdp_port}`,{noDefaults:true,timeout:15000});const context=browser.contexts()[0];if(!context)throw Error('Chrome 没有可连接的会话');const page=context.pages().find(p=>p.url().startsWith('https://www.facebook.com/'))||await context.newPage();if(!page.url().startsWith('https://www.facebook.com/'))await page.goto('https://www.facebook.com/',{waitUntil:'domcontentloaded',timeout:30000});await page.bringToFront();}finally{try{await browser?.close();}finally{release?.();}}}
-  async inspect(workspace,accountId){
+  async inspect(workspace,accountId,{leaseHeld=false}={}){
     const account=this.store.account(workspace,accountId),profile=this.profile(workspace,account.profile_id);
-    const {browser,page}=await this.page(profile);
+    const {browser,page}=await (leaseHeld?this.connectPage(profile):this.page(profile));
     try{
       await page.goto('https://www.facebook.com/me',{waitUntil:'domcontentloaded',timeout:45000});
       await page.locator('h1,input[name="email"],[aria-label="Your profile"]').first().waitFor({state:'visible',timeout:15000}).catch(()=>{});
@@ -171,21 +171,115 @@ export class FacebookBrowser {
       let page;({browser,page}=await this.page(profile));await page.goto(post.permalink,{waitUntil:'domcontentloaded',timeout:45000});await page.waitForTimeout(1000);await assertSafeFacebookPage(page,group.url);
       const actor=await currentActorName(page);if(!identityMatches(actor,checked.externalId,account))throw new Error('写入前 Facebook 身份发生变化，已阻止操作');
       const body=normalize(await page.locator('body').innerText());if(!body.includes(normalize(post.body).slice(0,Math.min(45,normalize(post.body).length))))throw new Error('帖子正文回读不匹配，已阻止操作');
-      const settings=this.store.proactiveSettings(workspace,account.id),effective=effectiveAction(post.proposed_action,settings),likeButton=page.getByRole('button',{name:/^(Like|点赞|赞|Thích|Unlike|取消赞|Bỏ thích)$/i}).first(),commentBox=page.locator('[role="textbox"][contenteditable="true"]').last();
+      const settings=this.store.proactiveSettings(workspace,account.id),effective=effectiveAction(post.proposed_action,settings),article=page.locator('div[role="article"]').filter({hasText:normalize(post.body).slice(0,45)}).first(),likeButton=article.getByRole('button',{name:/^(Like|点赞|赞|Thích|Unlike|取消赞|Bỏ thích)$/i}).first(),commentBox=article.locator('[role="textbox"][contenteditable="true"]').last();
       if(effective.includes('LIKE')&&!await likeButton.count())throw new Error('未找到稳定的点赞按钮，未执行任何写操作');
       if(effective.includes('REPLY')&&!await commentBox.count())throw new Error('未找到稳定的评论输入框，未执行任何写操作');
       plan=this.store.reserveProactivePost(workspace,post.id,replyBody);const results=[];
       for(const action of plan.actions){currentAction=action;submitted=false;
         if(action.action_type==='LIKE'){const label=await likeButton.getAttribute('aria-label')||await likeButton.innerText();if(!/Unlike|取消赞|Bỏ thích/i.test(label)){submitted=true;await likeButton.click({timeout:10000});}}
         else {await commentBox.fill(replyBody);const actual=normalize(await commentBox.textContent());if(actual!==normalize(replyBody))throw new Error('回复文本完整性核对失败');submitted=true;await commentBox.press('Enter');}
-        await page.waitForTimeout(1500);const fresh=await browser.contexts()[0].newPage();let evidence;try{await fresh.goto(post.permalink,{waitUntil:'domcontentloaded',timeout:45000});await fresh.waitForTimeout(900);evidence=await proactiveReadback(fresh,action.action_type,replyBody)}finally{await fresh.close().catch(()=>{})}
+        await page.waitForTimeout(1500);const fresh=await browser.contexts()[0].newPage();let evidence;try{await fresh.goto(post.permalink,{waitUntil:'domcontentloaded',timeout:45000});await fresh.waitForTimeout(900);await assertSafeFacebookPage(fresh,group.url);if(canonicalGroupPostUrl(fresh.url(),group.url)!==canonicalGroupPostUrl(post.permalink,group.url))throw Error('独立回读没有停留在目标帖子');evidence=await proactiveReadback(fresh,action.action_type,replyBody,checked.actualIdentity)}finally{await fresh.close().catch(()=>{})}
         if(!evidence.readback_verified)throw new Error('Facebook 写操作后未获得独立页面回读');results.push(this.store.finishProactiveAction(workspace,action.id,evidence));currentAction=null;
       }
       return {decision:plan.decision,actions:results};
     }catch(error){
-      if(currentAction)return this.store.markProactiveUnknown(workspace,currentAction.id,String(error));
+      if(currentAction){if(!submitted)return this.store.failProactiveBeforeSubmit(workspace,post.id,String(error));return this.store.markProactiveUnknown(workspace,currentAction.id,String(error));}
       if(/checkpoint|login challenge|temporarily blocked|suspicious activity|安全验证|访问受限/i.test(String(error))){const settings=this.store.proactiveSettings(workspace,account.id);this.store.saveProactiveSettings(workspace,{...settings,account_id:account.id,account_enabled:false})}
       throw error;
+    }finally{await browser?.close().catch(()=>{});this.activeProfiles.delete(profile.id);}
+  }
+  async reconcileProactiveBrowser(workspace,actionId){
+    const action=this.store.proactiveAction(workspace,actionId);if(action.state!=='RECONCILE_PENDING')throw Error('动作当前不需要核对');
+    const post=this.store.proactivePost(workspace,action.post_id),account=this.store.account(workspace,action.account_id),profile=this.profile(workspace,account.profile_id),group=this.store.db.prepare('SELECT * FROM facebook_groups WHERE id=? AND workspace=?').get(post.group_id,workspace);
+    if(this.activeProfiles.has(profile.id))throw Error('该账号正在执行任务');
+    this.activeProfiles.add(profile.id);let browser;
+    try{const session=await this.page(profile,{reconcile:true});browser=session.browser;const page=session.page;
+      const checked=await this.inspect(workspace,account.id,{leaseHeld:true});if(!checked.healthy)throw Error('身份核验失败');
+      await page.goto(post.permalink,{waitUntil:'domcontentloaded',timeout:45000});await assertSafeFacebookPage(page,group.url);
+      if(canonicalGroupPostUrl(page.url(),group.url)!==canonicalGroupPostUrl(post.permalink,group.url))throw Error('核对目标不匹配');
+      const evidence=await proactiveReadback(page,action.action_type,action.reply_body,checked.actualIdentity);
+      if(!evidence.readback_verified)throw Error('尚未找到完整回读证据，继续保留待核对，不能据此认定未发生');
+      return this.store.reconcileProactiveAction(workspace,action.id,{...evidence,found:true});
+    }finally{await browser?.close().catch(()=>{});this.activeProfiles.delete(profile.id);}
+  }
+  async syncBrowserInbox(workspace,accountId){
+    const account=this.store.account(workspace,accountId),profile=this.profile(workspace,account.profile_id);
+    if(this.activeProfiles.has(profile.id))throw Error('该账号正在执行任务');
+    this.activeProfiles.add(profile.id);let browser;
+    try{
+      const checked=await this.inspect(workspace,accountId);if(!checked.healthy)throw Error('Facebook 实际操作身份尚未核实');
+      const session=await this.page(profile);browser=session.browser;const page=session.page;
+      const posts=this.store.rows('published_posts',workspace).filter(p=>p.account_id===accountId).slice(0,25);
+      if(account.identity_type==='PAGE'){
+        await page.goto(`https://www.facebook.com/profile.php?id=${account.external_id}`,{waitUntil:'domcontentloaded',timeout:45000});await page.waitForTimeout(1200);
+        if(await currentActorName(page)!==checked.actualIdentity)throw Error('读取期间身份变化');
+        const urls=await page.locator('a[href]').evaluateAll((links,id)=>[...new Set(links.flatMap(link=>{try{const u=new URL(link.href),m=u.pathname.match(/^\/(\d+)\/posts\/(\d+)\/?$/);if(m&&m[1]===id)return [u.href];if(u.pathname==='/permalink.php'&&u.searchParams.get('id')===id&&/^\d+$/.test(u.searchParams.get('story_fbid')||''))return [u.href];return [];}catch{return [];}}))].slice(0,25),account.external_id);
+        for(const url of urls){const u=new URL(url),id=u.pathname.match(/\/posts\/(\d+)/)?.[1]||u.searchParams.get('story_fbid');const post=this.store.upsertPagePost(workspace,accountId,{id:account.external_id+'_'+id,permalink_url:url});if(!posts.some(p=>p.id===post.id))posts.push(post);}
+      }
+      let comments=0,read=0;
+      for(const post of posts.slice(0,25)){
+        const target=new URL(post.post_url);if(target.protocol!=='https:'||!/(^|\.)facebook\.com$/.test(target.hostname))throw Error('帖子地址不是 Facebook');
+        await page.goto(target.href,{waitUntil:'domcontentloaded',timeout:45000});await page.waitForTimeout(900);
+        if(await currentActorName(page)!==checked.actualIdentity||/login|checkpoint/i.test(page.url()))throw Error('读取期间需要重新核实身份');
+        const rows=await page.locator('div[role="article"]').evaluateAll(nodes=>nodes.flatMap(node=>{
+          const links=[...node.querySelectorAll('a[href]')],comment=links.find(a=>{try{return new URL(a.href).searchParams.has('comment_id');}catch{return false;}});
+          if(!comment)return [];const u=new URL(comment.href),author=links.find(a=>a!==comment&&/\/user\/|profile.php|\/people\//.test(a.href));
+          const texts=[...node.querySelectorAll('[dir="auto"]')].filter(x=>x.closest('[role="article"]')===node).map(x=>(x.innerText||'').trim()).filter(Boolean);
+          const body=texts.sort((a,b)=>b.length-a.length)[0];return body?[{external_id:u.searchParams.get('reply_comment_id')||u.searchParams.get('comment_id'),parent_id:u.searchParams.get('reply_comment_id')?u.searchParams.get('comment_id'):null,author:(author?.innerText||'Facebook 用户').trim(),body}]:[];
+        }));
+        const unique=[...new Map(rows.map(row=>[row.external_id,row])).values()];this.store.upsertComments(workspace,post.id,unique);comments+=unique.length;read++;
+      }
+      return {mode:'BROWSER',posts:read,comments,limited:true};
+    }finally{await browser?.close().catch(()=>{});this.activeProfiles.delete(profile.id);}
+  }
+  async replyInboxCandidate(workspace,candidateId,{reconcile=false}={}){
+    const candidate=this.store.engagementCandidate(workspace,candidateId),comment=this.store.comment(workspace,candidate.comment_id),account=this.store.account(workspace,candidate.account_id),profile=this.profile(workspace,account.profile_id),post=this.store.db.prepare('SELECT * FROM published_posts WHERE id=? AND workspace=?').get(comment.post_id,workspace);
+    if(!/^\d+$/.test(comment.external_id||''))throw Error('评论没有稳定 ID，不能自动回复');
+    if(reconcile&&candidate.state!=='UNKNOWN')throw Error('候选当前不需要核对');
+    if(this.activeProfiles.has(profile.id))throw Error('该账号正在执行任务');
+    this.activeProfiles.add(profile.id);let browser,reservation,submitted=false;
+    try{
+      const session=await this.page(profile,{reconcile});browser=session.browser;const page=session.page;
+      const checked=await this.inspect(workspace,account.id,{leaseHeld:true});if(!checked.healthy)throw Error('浏览器身份核验失败');
+      const target=new URL(post.post_url);if(target.protocol!=='https:'||!/(^|\.)facebook\.com$/.test(target.hostname))throw Error('无效的目标帖子');
+      target.searchParams.set('comment_id',comment.parent_id||comment.external_id);
+      await page.goto(target.href,{waitUntil:'domcontentloaded',timeout:45000});await page.waitForTimeout(1000);
+      if(await currentActorName(page)!==checked.actualIdentity||/checkpoint|login/i.test(page.url()))throw Error('当前操作身份发生变化');
+      const anchor=page.locator(`a[href*="comment_id=${comment.parent_id||comment.external_id}"]`).first();
+      const article=anchor.locator('xpath=ancestor::div[@role="article"][1]');
+      if(!await article.count()||!normalize(await article.innerText()).includes(normalize(comment.body)))throw Error('目标评论正文无法独立核实');
+      if(reconcile){
+        const evidence=await radarReplyReadback(page,candidate.draft,checked.actualIdentity,comment.parent_id||comment.external_id);
+        if(!evidence.readback_verified)throw Error('未找到完整回复证据，继续保留待核对');
+        reservation=this.store.db.prepare("SELECT * FROM quota_events WHERE workspace=? AND subject_id=? AND state='RESERVED'").get(workspace,candidate.id);if(!reservation)throw Error('原额度预留不存在');
+        return this.store.finishAutoReply(workspace,candidate.id,reservation.id,evidence);
+      }
+      reservation=this.store.reserveReplyQuota(workspace,candidate.id).reservation;
+      const reply=article.getByRole('button',{name:/^(Reply|回复|Trả lời)$/i}).first();if(!await reply.count())throw Error('没有可核实的评论回复按钮');await reply.click();
+      const box=article.locator('[role="textbox"][contenteditable="true"]').last();if(!await box.count())throw Error('没有目标评论的回复输入框');
+      await box.fill(candidate.draft);if(normalize(await box.textContent())!==normalize(candidate.draft))throw Error('回复正文核对失败');
+      this.store.beginAutoReply(workspace,candidate.id,reservation.id);submitted=true;await box.press('Enter');
+      const fresh=await browser.contexts()[0].newPage();let evidence;try{await fresh.goto(target.href,{waitUntil:'domcontentloaded',timeout:45000});await fresh.waitForTimeout(1200);evidence=await radarReplyReadback(fresh,candidate.draft,checked.actualIdentity,comment.parent_id||comment.external_id);}finally{await fresh.close().catch(()=>{});}
+      if(!evidence.readback_verified)throw Error('已提交，但回复作者或正文未被独立确认');
+      return this.store.finishAutoReply(workspace,candidate.id,reservation.id,evidence);
+    }catch(error){if(reservation&&!reconcile){if(submitted)return this.store.markAutoReplyUnknown(workspace,candidate.id,reservation.id,String(error));this.store.releaseQuota(workspace,reservation.id,'提交前失败');}throw error;}
+    finally{await browser?.close().catch(()=>{});this.activeProfiles.delete(profile.id);}
+  }
+  async reconcileThemeReply(workspace,candidateId){
+    const candidate=this.store.engagementCandidate(workspace,candidateId),comment=this.store.comment(workspace,candidate.comment_id),source=this.store.db.prepare('SELECT * FROM published_posts WHERE id=? AND workspace=?').get(comment.post_id,workspace);
+    if(!source.job_id.startsWith('radar-group:'))return this.replyInboxCandidate(workspace,candidateId,{reconcile:true});
+    if(candidate.state!=='UNKNOWN')throw Error('候选当前不需要核对');
+    const account=this.store.account(workspace,candidate.account_id),profile=this.profile(workspace,account.profile_id);
+    if(this.activeProfiles.has(profile.id))throw Error('该账号正在执行任务');
+    this.activeProfiles.add(profile.id);let browser;
+    try{const session=await this.page(profile,{reconcile:true});browser=session.browser;const page=session.page;
+      const checked=await this.inspect(workspace,account.id,{leaseHeld:true});if(!checked.healthy)throw Error('浏览器身份核验失败');
+      const group=this.store.db.prepare('SELECT * FROM facebook_groups WHERE id=? AND workspace=? AND account_id=?').get(source.group_id,workspace,account.id);
+      const target=canonicalGroupPostUrl(source.post_url,group.url);await page.goto(target,{waitUntil:'domcontentloaded',timeout:45000});await page.waitForTimeout(1200);await assertSafeFacebookPage(page,group.url);
+      if(canonicalGroupPostUrl(page.url(),group.url)!==target)throw Error('回读目标帖子不匹配');
+      const evidence=await radarReplyReadback(page,candidate.draft,checked.actualIdentity);if(!evidence.readback_verified)throw Error('未找到完整回复证据，继续待核对');
+      const held=this.store.db.prepare("SELECT * FROM quota_events WHERE workspace=? AND subject_id=? AND state='RESERVED'").get(workspace,candidate.id);if(!held)throw Error('原额度预留不存在');
+      return this.store.finishAutoReply(workspace,candidate.id,held.id,evidence);
     }finally{await browser?.close().catch(()=>{});this.activeProfiles.delete(profile.id);}
   }
   async prepareJob(workspace,jobId){const job=this.store.job(workspace,jobId),account=this.store.account(workspace,job.account_id),profile=this.profile(workspace,job.profile_id),group=this.store.db.prepare('SELECT * FROM facebook_groups WHERE id=?').get(job.group_id),content=this.store.db.prepare('SELECT * FROM group_content WHERE id=?').get(job.content_id);const checked=await this.inspect(workspace,account.id);this.store.beginPrepare(workspace,job.id,checked.actualIdentity);let browser;try{let page;({browser,page}=await this.page(profile));await page.goto(group.url,{waitUntil:'domcontentloaded',timeout:45000});if(!page.url().includes(new URL(group.url).pathname))throw new Error('Facebook 未停留在目标群组，已阻止写入');await page.waitForTimeout(1000);const preexisting=await groupPostCandidates(page,group.url,content.body,account.expected_identity);if(preexisting.length)throw new Error('目标群组已有相同正文帖子，请先核对，禁止重复准备');const {dialog,box}=await openPostComposer(page);await box.fill(content.body,{timeout:10000});const actual=await box.textContent();if(normalize(actual)!==normalize(content.body))throw new Error('正文完整性核对失败，已阻止提交');const media=JSON.parse(content.media_json);if(media.length){const input=dialog.locator('input[type=file]').last();if(!await input.count())throw new Error('未找到媒体附件入口');await input.setInputFiles(media);await page.waitForTimeout(1000);}const evidence={target_url:page.url(),group_name:group.name,actual_identity:checked.actualIdentity,text_hash:content.content_hash,media_count:media.length,prepared_at:new Date().toISOString(),human_final_click_required:true,preexisting_post_urls:preexisting};this.store.finishPrepare(workspace,job.id,evidence);setTimeout(()=>this.watchManualPost(workspace,job.id).catch(()=>{}),0).unref();return evidence;}catch(error){if(this.store.job(workspace,job.id).state==='PREPARING')this.store.failBeforeSubmit(workspace,job.id,String(error));throw error;}finally{await browser?.close().catch(()=>{});}}
@@ -295,10 +389,12 @@ export class FacebookBrowser {
   health(accountId,status,verified){this.store.db.prepare('UPDATE facebook_accounts SET session_health=?,identity_verified_at=? WHERE id=?').run(status,verified?new Date().toISOString():null,accountId);}
   profile(workspace,id){return this.store.db.prepare('SELECT * FROM execution_profiles WHERE id=? AND workspace=?').get(id,workspace)||(()=>{throw new Error('执行环境不存在')})();}
   resourcePending(profile){
+    const pageTable=this.store.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='publisher_jobs'").get();
+    const publication=pageTable&&this.store.db.prepare("SELECT 1 FROM publisher_jobs WHERE json_extract(snapshot_json,'$.profileId')=? AND state IN ('SUBMITTING','UNKNOWN') LIMIT 1").get(profile.id);
     const group=this.store.db.prepare("SELECT 1 FROM group_jobs WHERE profile_id=? AND state IN ('UNKNOWN','PROCESSING','WAITING_FOR_USER') LIMIT 1").get(profile.id);
     const action=this.store.db.prepare("SELECT 1 FROM engagement_actions e JOIN facebook_accounts a ON a.id=e.account_id AND a.workspace=e.workspace WHERE a.profile_id=? AND e.state IN ('ATTEMPTING','RECONCILE_PENDING') LIMIT 1").get(profile.id);
     const reply=this.store.db.prepare("SELECT 1 FROM engagement_candidates e JOIN facebook_accounts a ON a.id=e.account_id AND a.workspace=e.workspace WHERE a.profile_id=? AND e.state IN ('SUBMITTING','UNKNOWN') LIMIT 1").get(profile.id);
-    return Boolean(group||action||reply);
+    return Boolean(publication||group||action||reply);
   }
   async page(profile,{reconcile=false}={}){const release=this.resources?.acquire(profile.user_data_dir,'operator:'+profile.id,()=>this.resourcePending(profile),{reconcile});try{return await this.connectPage(profile,release);}catch(error){release?.();throw error;}}
   async connectPage(profile,release){if(!await cdpReady(profile.cdp_port))throw new Error('执行环境未连接，请到“账号与设置”启动 Chrome');if(!await portMatchesProfile(profile))throw Error('调试端口不属于当前客户的 Chrome 数据目录；已阻止跨账号操作');const {chromium}=await import('playwright-core');const browser=await chromium.connectOverCDP(`http://127.0.0.1:${profile.cdp_port}`,{noDefaults:true,timeout:15000});const close=browser.close.bind(browser);browser.close=async()=>{try{return await close();}finally{release?.();}};try{const context=browser.contexts()[0];if(!context)throw new Error('Chrome 没有可连接的会话');const page=context.pages().find(p=>/^https:\/\/(www\.)?facebook\.com\//.test(p.url()))||await context.newPage();await page.bringToFront();return {browser,page};}catch(error){await browser.close();throw error;}}
@@ -428,16 +524,17 @@ export function normalizeProactiveResults(rows,group,lookbackHours=24,now=Date.n
 
 async function assertSafeFacebookPage(page,groupUrl){const target=new URL(groupUrl),current=new URL(page.url());if(!/^(www\.)?facebook\.com$/.test(current.hostname)||!(/^(www\.)?facebook\.com$/.test(target.hostname))||current.pathname.match(/^\/groups\/([^/]+)/)?.[1]!==target.pathname.match(/^\/groups\/([^/]+)/)?.[1])throw new Error('Facebook 未停留在授权群组，已停止');const body=await page.locator('body').innerText();if(/checkpoint|login challenge|temporarily blocked|suspicious activity|security check|安全验证|可疑活动|暂时封锁|访问受限/i.test(page.url()+' '+body))throw new Error('Facebook checkpoint 或访问限制，已暂停账号自动化');}
 function effectiveAction(action,settings){let out=action;if(out.includes('LIKE')&&!settings?.auto_like)out=out==='LIKE_AND_REPLY'?'REPLY_ONLY':'SKIP';if(out.includes('REPLY')&&!settings?.auto_reply)out=out==='LIKE_AND_REPLY'?'LIKE_ONLY':'SKIP';if(out==='SKIP')throw new Error('当前自动开关没有允许的动作');return out;}
-async function proactiveReadback(page,action,replyBody){let liked=true,replied=true;if(action.includes('LIKE')){const unlike=page.getByRole('button',{name:/^(Unlike|取消赞|Bỏ thích)$/i}).first();liked=Boolean(await unlike.count())}if(action.includes('REPLY')){const expected=normalize(replyBody);replied=await page.locator('div[role="article"]').evaluateAll((nodes,text)=>nodes.some(node=>(node.innerText||'').replace(/\s+/g,' ').includes(text)),expected)}return {readback_verified:liked&&replied,liked,replied,checked_at:new Date().toISOString(),method:'FRESH_POST_BROWSER_READBACK'};}
+async function proactiveReadback(page,action,replyBody,actor){let liked=true,replied=true;if(action.includes('LIKE')){const unlike=page.locator('div[role="article"]').first().getByRole('button',{name:/^(Unlike|取消赞|Bỏ thích)$/i}).first();liked=Boolean(await unlike.count())}if(action.includes('REPLY')){replied=(await radarReplyReadback(page,replyBody,actor)).readback_verified;}return {readback_verified:liked&&replied,liked,replied,author_verified:action.includes('REPLY')?replied:undefined,checked_at:new Date().toISOString(),method:'FRESH_POST_BROWSER_READBACK'};}
 function cdpReady(port){return new Promise(resolve=>{const req=request({host:'127.0.0.1',port,path:'/json/version',timeout:500},res=>{res.resume();resolve(res.statusCode===200)});req.on('error',()=>resolve(false));req.on('timeout',()=>{req.destroy();resolve(false)});req.end();});}
 
 
-async function radarReplyReadback(page,replyBody,actor){
- const verified=await page.locator('div[role="article"]').evaluateAll((nodes,{text,author})=>nodes.some(node=>{
+async function radarReplyReadback(page,replyBody,actor,parentId=null){
+ const verified=await page.locator('div[role="article"]').evaluateAll((nodes,{text,author,parentId})=>nodes.some(node=>{
   const normalize=value=>String(value||'').replace(/\s+/g,' ').trim();
-  const authored=[...node.querySelectorAll('a[href]')].some(link=>normalize(link.innerText||link.textContent)===author);
-  const exact=[...node.querySelectorAll('[dir="auto"],p,span')].some(element=>normalize(element.innerText||element.textContent)===text);
-  return authored&&exact;
- }),{text:normalize(replyBody),author:normalize(actor)});
+  const authored=[...node.querySelectorAll('a[href]')].some(link=>link.closest('[role="article"]')===node&&normalize(link.innerText||link.textContent)===author);
+  const exact=[...node.querySelectorAll('[dir="auto"],p,span')].some(element=>element.closest('[role="article"]')===node&&normalize(element.innerText||element.textContent)===text);
+  const parent=!parentId||[...node.querySelectorAll('a[href]')].some(link=>{try{return new URL(link.href).searchParams.get('comment_id')===parentId;}catch{return false;}});
+  return authored&&exact&&parent;
+ }),{text:normalize(replyBody),author:normalize(actor),parentId});
  return {readback_verified:verified,replied:verified,checked_at:new Date().toISOString(),method:'FRESH_POST_BROWSER_READBACK',author_verified:verified};
 }
