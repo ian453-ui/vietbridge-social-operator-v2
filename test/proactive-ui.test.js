@@ -37,5 +37,15 @@ test('fact-sensitive candidates expose a source verification form without an exe
  const line=source.split('\n').find(line=>line.startsWith('function proactiveView()'));
  const html=vm.runInNewContext(line+'\nproactiveView()',context);
  assert.match(html,/data-save-fact="post"/);assert.doesNotMatch(html,/data-execute-proactive="post"/);
- assert.match(html,/Operating account/);
+  assert.match(html,/Operating account/);
+  assert.match(html,/id="proactive-mode"/);
+});
+
+test('topic view scopes candidates to the selected account and quota to the last 24 hours',()=>{
+ const context={esc:String,Date,fb:{selectedAccountId:'a',accounts:[{id:'a',enabled:true}],engagementPolicies:[{account_id:'a',mode:'SHADOW'}],facebookComments:[],engagementCandidates:[{id:'mine',account_id:'a',state:'REPLY_CANDIDATE',risk:'LOW'},{id:'other',account_id:'b',state:'REPLY_CANDIDATE',risk:'LOW'}],quotaEvents:[{account_id:'a',operation:'REPLY',state:'CONSUMED',reserved_at:new Date().toISOString()},{account_id:'a',operation:'REPLY',state:'CONSUMED',reserved_at:'2000-01-01T00:00:00Z'},{account_id:'b',operation:'REPLY',state:'CONSUMED',reserved_at:new Date().toISOString()}]}};
+ const line=source.split('\n').find(line=>line.startsWith('function engagementView()'));
+ const html=vm.runInNewContext(line+'\nengagementView()',context);
+ assert.match(html,/<strong>1\/12<\/strong>/);
+ assert.match(html,/data-reserve-candidate="mine" disabled/);
+ assert.doesNotMatch(html,/data-reserve-candidate="other"/);
 });

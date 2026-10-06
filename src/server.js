@@ -10,31 +10,31 @@ import {Store} from './store.js';
 import {FacebookBrowser} from './facebook-browser.js';
 import {cloudRuntime,authenticate} from './cloud-runtime.js';
 const runtime=cloudRuntime();
-const GroupLibrary=runtime?null:(await import('./library.js')).GroupLibrary;
+const GroupLibrary=runtime&&!runtime.executionConnected?null:(await import('./library.js')).GroupLibrary;
 import {FacebookEngagement,apiEnabled} from './facebook-engagement.js';
 import {PublicationVerifier} from './publication-verifier.js';
 const root=dirname(fileURLToPath(import.meta.url));
 const execFileAsync=promisify(execFile);
 export function createApp(dbPath=join(runtime?.dataDir||join(homedir(),'Library/Application Support/VietBridgeSocialOperatorV2'),'mock.sqlite'),options={}){
- const cloud=options.cloud||runtime;
- const store=new Store(dbPath),token=randomUUID(),facebook=new FacebookBrowser(store),engagement=new FacebookEngagement(store),library=cloud?null:new GroupLibrary(store,options.library),verifier=new PublicationVerifier(options.verifier);
+ const cloud=options.cloud||runtime,localExecution=!cloud||cloud.executionConnected===true;
+ const store=new Store(dbPath),token=randomUUID(),facebook=new FacebookBrowser(store),engagement=new FacebookEngagement(store),library=localExecution?new GroupLibrary(store,options.library):null,verifier=new PublicationVerifier(options.verifier);
  const server=createServer(async(req,res)=>{try{
-  const origin=cloud?cloud.origin:`http://${req.headers.host}`;
-  if(cloud){if(req.headers.host!==cloud.host)throw Error('无效主机');if(!authenticate(req,res,cloud))return;}
+  const origin=cloud&&!(cloud.executionConnected&&/^127\.0\.0\.1:\d+$/.test(req.headers.host||''))?cloud.origin:`http://${req.headers.host}`;
+  if(cloud){if(req.headers.host!==cloud.host&&!(cloud.executionConnected&&/^127\.0\.0\.1:\d+$/.test(req.headers.host||'')))throw Error('无效主机');if(!authenticate(req,res,cloud))return;}
   else if(!/^127\.0\.0\.1:\d+$/.test(req.headers.host||''))throw Error('无效主机');
   const url=new URL(req.url,origin);
   res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');
   if(cloud){
    res.setHeader('Content-Security-Policy',"default-src 'self'; object-src 'none'; frame-ancestors 'none'");
    const localOnly=/^\/api\/(group-library|local\/pick-path)/.test(url.pathname)||req.method==='POST'&&url.pathname.endsWith('/proactive/scan')||req.method==='POST'&&/\/(profiles|accounts|library|inbox|group-jobs|reply-intents|posts|content)(\/|$)|\/radar\/search$|\/reserve$/.test(url.pathname);
-   if(localOnly)return send(res,409,{error:'云端执行器尚未连接，此操作暂不可用'});
-   if(req.method==='GET'&&url.pathname==='/api/health')return send(res,200,{ok:true,mode:'cloud-control-plane',persistent:true,executionConnected:false});
+   if(localOnly&&!localExecution)return send(res,409,{error:'云端执行器尚未连接，此操作暂不可用'});
+   if(req.method==='GET'&&url.pathname==='/api/health')return send(res,200,{ok:true,mode:localExecution?'mac-tunnel':'cloud-control-plane',persistent:true,executionConnected:localExecution});
   }
   if(req.method==='GET'&&['/','/client.js','/group-filters.js','/styles.css'].includes(url.pathname)){
    const name=url.pathname==='/'?'index.html':url.pathname.slice(1);res.setHeader('Content-Type',name.endsWith('.js')?'text/javascript':name.endsWith('.css')?'text/css':'text/html');return res.end(await readFile(join(root,name)));
   }
   if(req.method==='GET'&&url.pathname==='/api/state')return send(res,200,{...store.view(url.searchParams.get('workspace')),token});
-  if(req.method==='GET'&&url.pathname==='/api/facebook'){const view=store.facebookView(url.searchParams.get('workspace'));return send(res,200,{...view,accounts:view.accounts.map(account=>({...account,api_enabled:apiEnabled(account)})),recommendedProfileDir:join(homedir(),'Library/Application Support/VietBridgeSocialOperatorV2/chrome-profiles',url.searchParams.get('workspace'))});}
+  if(req.method==='GET'&&url.pathname==='/api/facebook'){const view=store.facebookView(url.searchParams.get('workspace'));return send(res,200,{...view,runtimeMode:cloud?.mode||'local',executionConnected:localExecution,accounts:view.accounts.map(account=>({...account,api_enabled:apiEnabled(account)})),recommendedProfileDir:join(homedir(),'Library/Application Support/VietBridgeSocialOperatorV2/chrome-profiles',url.searchParams.get('workspace'))});}
   if(req.method==='GET'&&url.pathname==='/api/publication-verification')return send(res,200,await verifier.list());
   if(req.method==='GET'&&url.pathname==='/api/publication-verification/wechat-browser')return send(res,200,await verifier.wechatBrowserStatus());
   if(req.method==='GET'&&url.pathname==='/api/group-library')return send(res,200,{items:library.catalogue(url.searchParams.get('workspace'),url.searchParams.get('q'),url.searchParams.get('refresh')==='1')});
@@ -80,7 +80,7 @@ export function createApp(dbPath=join(runtime?.dataDir||join(homedir(),'Library/
    if(url.pathname.endsWith('/proactive/scan'))return send(res,200,await facebook.scanProactiveEngagement(ws,input.account_id));
    if(url.pathname.endsWith('/engagement/candidates/build'))return send(res,200,{candidates:store.buildEngagementCandidates(ws,input.account_id),quota:store.quotaStatus(ws,input.account_id)});
    if(url.pathname.endsWith('/engagement/radar/search'))return send(res,200,await facebook.searchGroupTopics(ws,input.account_id,input));
-   let quota=url.pathname.match(/^\/api\/workspaces\/([^/]+)\/engagement\/candidates\/([^/]+)\/reserve$/);if(quota)return send(res,200,await engagement.autoReply(decodeURIComponent(quota[1]),decodeURIComponent(quota[2])));
+   let quota=url.pathname.match(/^\/api\/workspaces\/([^/]+)\/engagement\/candidates\/([^/]+)\/reserve$/);if(quota){const workspace=decodeURIComponent(quota[1]),id=decodeURIComponent(quota[2]),candidate=store.engagementCandidate(workspace,id),comment=store.comment(workspace,candidate.comment_id),source=store.db.prepare('SELECT job_id FROM published_posts WHERE id=? AND workspace=?').get(comment.post_id,workspace);return send(res,200,source?.job_id.startsWith('radar-group:')?await facebook.replyRadarCandidate(workspace,id):await engagement.autoReply(workspace,id));}
    quota=url.pathname.match(/^\/api\/workspaces\/([^/]+)\/engagement\/reservations\/([^/]+)\/release$/);if(quota)return send(res,200,store.releaseQuota(decodeURIComponent(quota[1]),decodeURIComponent(quota[2]),input.reason));
    let proactive=url.pathname.match(/^\/api\/workspaces\/([^/]+)\/proactive\/posts\/([^/]+)\/execute$/);if(proactive)return send(res,200,await facebook.executeProactiveEngagement(decodeURIComponent(proactive[1]),decodeURIComponent(proactive[2]),input.reply_body));
    proactive=url.pathname.match(/^\/api\/workspaces\/([^/]+)\/proactive\/posts\/([^/]+)\/fact-sources$/);if(proactive)return send(res,200,store.addFactSource(decodeURIComponent(proactive[1]),decodeURIComponent(proactive[2]),input));
@@ -99,4 +99,5 @@ export function createApp(dbPath=join(runtime?.dataDir||join(homedir(),'Library/
 }
 function send(res,status,x){res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(x));}
 async function importLocalAccount(value){const text=String(value||'').trim();if(!text)throw Error('请填写本地配置文件地址');if(/^[a-z][a-z0-9+.-]*:/i.test(text)&&!text.startsWith('file://'))throw Error('账号配置只允许本地文件地址');const requested=text.startsWith('file://')?fileURLToPath(text):text,path=await realpath(requested),info=await stat(path);if(!info.isFile())throw Error('本地账号配置地址不是文件');if(/\.(rtf|docx?)$/i.test(path))throw Error('富文本不能作为账号配置；请选择纯文本 .env 或 .json 文件');if((info.mode&0o077)!==0)throw Error('本地账号配置文件权限过宽，请设为仅当前用户可读写（600）');const raw=await readFile(path,'utf8');let data={};if(path.endsWith('.json'))data=JSON.parse(raw);else for(const line of raw.split(/\r?\n/)){const m=line.match(/^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=\s*(.*?)\s*$/);if(m)data[m[1]]=m[2].replace(/^(['"])(.*)\1$/,'$2')}if(!data.FB_PAGE_ID&&!data.FB_ACCOUNT_NAME&&!data.FB_PAGE_NAME)throw Error('配置文件没有可识别的 Facebook 账号字段');return {config_url:path,display_name:data.FB_ACCOUNT_NAME||data.FB_PAGE_NAME||'',expected_identity:data.FB_EXPECTED_IDENTITY||data.FB_PAGE_NAME||'',external_id:data.FB_PAGE_ID||''};}
-if(process.argv[1]===fileURLToPath(import.meta.url))createApp().listen(Number(process.env.PORT||17882),runtime?'0.0.0.0':'127.0.0.1',()=>console.log(runtime?'VietBridge cloud control plane ready':'V2 http://127.0.0.1:17882'));
+if(process.argv[1]===fileURLToPath(import.meta.url))createApp().listen(Number(process.env.PORT||17882),runtime&&!runtime.executionConnected?'0.0.0.0':'127.0.0.1',()=>console.log(runtime?.executionConnected?'VietBridge authenticated Mac Tunnel ready':runtime?'VietBridge cloud control plane ready':'V2 http://127.0.0.1:17882'));
+
