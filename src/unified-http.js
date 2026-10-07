@@ -1,5 +1,7 @@
 /** Authenticated parent server calls this only after Host/auth/Origin/CSRF validation. */
 export function unifiedRoute(publisher, method, url, input={},executor=null) {
+  const contentStatus=url.pathname.match(/^\/api\/unified\/workspaces\/([^/]+)\/accounts\/([^/]+)\/content-status$/);
+  if(contentStatus){if(method!=='GET')return {status:405,body:{error:'METHOD_NOT_ALLOWED'}};return {status:200,body:publisher.contentStatus(decodeURIComponent(contentStatus[1]),decodeURIComponent(contentStatus[2]))};}
   const preparation=url.pathname.match(/^\/api\/unified\/workspaces\/([^/]+)\/jobs\/([^/]+)\/resolve-preparation$/);
   if(preparation){if(method!=='POST')return {status:405,body:{error:'METHOD_NOT_ALLOWED'}};if(!executor)throw Error('执行器未接入');return executor.resolvePreparation(decodeURIComponent(preparation[1]),decodeURIComponent(preparation[2]),input).then(body=>({status:200,body}));}
   const inspect=url.pathname.match(/^\/api\/unified\/workspaces\/([^/]+)\/accounts\/([^/]+)\/inspect$/);

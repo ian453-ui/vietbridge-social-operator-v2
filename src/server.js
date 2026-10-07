@@ -8,7 +8,8 @@ import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {Store} from './store.js';
 import {FacebookBrowser} from './facebook-browser.js';
-import {cloudRuntime,authenticate} from './cloud-runtime.js';
+import {cloudRuntime} from './cloud-runtime.js';
+import {PublisherAccess,loginPage} from './publisher-access.js';
 const runtime=cloudRuntime();
 const GroupLibrary=runtime&&!runtime.executionConnected?null:(await import('./library.js')).GroupLibrary;
 import {FacebookEngagement,apiEnabled} from './facebook-engagement.js';
@@ -28,6 +29,7 @@ export function createApp(dbPath=join(runtime?.dataDir||join(homedir(),'Library/
  if(publisherOptions)validateIntegrationPaths(dbPath,publisherOptions);
  const cloud=options.cloud||runtime,localExecution=!cloud||cloud.executionConnected===true;
  const store=new Store(dbPath,{seedDemo:!options.unified}),token=randomUUID(),facebook=new FacebookBrowser(store),engagement=new FacebookEngagement(store),library=localExecution?new GroupLibrary(store,options.library):null,verifier=new PublicationVerifier(options.verifier);
+ const access=cloud?new PublisherAccess(cloud):null;
  const unified=options.unified?new UnifiedPublisher(store):null;
  if(unified&&options.recoverStartup)unified.recoverAfterShutdown();
  const executionEnabled=options.executionEnabled===true;
@@ -43,13 +45,23 @@ export function createApp(dbPath=join(runtime?.dataDir||join(homedir(),'Library/
  const server=createServer(async(req,res)=>{try{
   const loopback=/^(127\.0\.0\.1|localhost):\d+$/.test(req.headers.host||'');
   const origin=cloud&&!(cloud.executionConnected&&loopback)?cloud.origin:`http://${req.headers.host}`;
-  if(cloud){if(req.headers.host!==cloud.host&&!(cloud.executionConnected&&loopback))throw Error('无效主机');if(!authenticate(req,res,cloud))return;}
+  if(cloud){if(req.headers.host!==cloud.host&&!(cloud.executionConnected&&loopback))throw Error('无效主机');}
   else if(!loopback)throw Error('无效主机');
   const url=new URL(req.url,origin);
+  let principal=null;
+  if(access){
+   res.setHeader('Cache-Control','no-store');
+   res.setHeader('Content-Security-Policy',"default-src 'self'; form-action 'self'; object-src 'none'; frame-ancestors 'none'");
+   if(req.method==='GET'&&url.pathname==='/login'){res.setHeader('Content-Type','text/html; charset=utf-8');return res.end(loginPage);}
+   if(req.method==='POST'&&url.pathname==='/auth/login'){if(req.headers.origin!==origin)return send(res,403,{error:'登录来源无效'});let raw='';for await(const c of req){raw+=c;if(raw.length>4096)return send(res,413,{error:'请求过大'});}const input=new URLSearchParams(raw);try{const session=access.login(input.get('username'),input.get('password'));res.setHeader('Set-Cookie','publisher_session='+session+'; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200'+(origin.startsWith('https:')?'; Secure':''));res.writeHead(303,{Location:'/'});return res.end();}catch{res.writeHead(401,{'Content-Type':'text/html; charset=utf-8'});return res.end('<p>登录未成功，请检查用户名或密码；频繁尝试时请稍后重试。</p><a href="/login">返回登录</a>');}}
+   principal=access.authenticate(req);if(!principal){if(req.method==='GET'&&url.pathname==='/'){res.writeHead(303,{Location:'/login'});return res.end();}return send(res,401,{error:'请登录 Publisher',login:'/login'});}
+   if(!access.authorizeApp(principal,req.method,url))return send(res,403,{error:'应用未获此客户或操作的权限'});
+   if(req.method==='GET'&&url.pathname==='/api/access/tokens')return send(res,200,{tokens:access.list(),user:access.data.user});
+  }
   const publisherContext=()=>publisher.context(url.searchParams.get('workspace')||'',url.searchParams.get('accountId')||'');
   const requestVerifier=()=>publisher?new PublicationVerifier({scoped:true,fetch:(path,init)=>publisher.fetch(publisherContext(),path,init)}):verifier;
   res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');
-  if(unified&&req.method==='GET'&&url.pathname==='/api/health')return send(res,200,{ok:true,version:'2.3.0-alpha.1',mode:'publisher-unified',head:/^[a-f0-9]{40}$/.test(process.env.PUBLISHER_BUILD_HEAD||'')?process.env.PUBLISHER_BUILD_HEAD:null,executionEnabled,scanSchedulerEnabled:Boolean(scheduler),persistent:true});
+  if(unified&&req.method==='GET'&&url.pathname==='/api/health')return send(res,200,{ok:true,version:'2.3.0-alpha.2',mode:'publisher-unified',head:/^[a-f0-9]{40}$/.test(process.env.PUBLISHER_BUILD_HEAD||'')?process.env.PUBLISHER_BUILD_HEAD:null,executionEnabled,scanSchedulerEnabled:Boolean(scheduler),persistent:true});
   if(unified&&req.method==='GET'&&url.pathname==='/api/automation/capabilities')return send(res,200,{...publisherAutomationCapabilities,operations:{...publisherAutomationCapabilities.operations,submit_platform_task:{supported:executionEnabled,requires_explicit_user_authorization:true},submit_to_facebook:{supported:executionEnabled,reason:executionEnabled?'requires approved task and explicit submit action':'acceptance mode; real submission disabled'}}});
   if(req.method==='GET'&&url.pathname==='/api/publisher-integration'){
    if(!publisher)return send(res,200,{enabled:false,error:'发布模块未配置'});
@@ -68,12 +80,12 @@ export function createApp(dbPath=join(runtime?.dataDir||join(homedir(),'Library/
    if(localOnly&&!localExecution)return send(res,409,{error:'云端执行器尚未连接，此操作暂不可用'});
    if(req.method==='GET'&&url.pathname==='/api/health')return send(res,200,{ok:true,mode:localExecution?'mac-tunnel':'cloud-control-plane',persistent:true,executionConnected:localExecution});
   }
-  if(req.method==='GET'&&['/','/client.js','/unified-client.js','/group-selection.js','/group-filters.js','/styles.css'].includes(url.pathname)){
+  if(req.method==='GET'&&['/','/client.js','/unified-client.js','/group-selection.js','/group-filters.js','/publisher-access-ui.js','/publication-selection.js','/styles.css'].includes(url.pathname)){
    const name=url.pathname==='/'?'index.html':url.pathname.slice(1);res.setHeader('Content-Type',name.endsWith('.js')?'text/javascript':name.endsWith('.css')?'text/css':'text/html');return res.end(await readFile(join(root,name)));
   }
   if(req.method==='GET'&&url.pathname==='/api/state')return send(res,200,{...store.view(url.searchParams.get('workspace')),token,unified:Boolean(unified),executionEnabled,integrationAcceptance:Boolean(unified&&!executionEnabled||publisher&&publisherOptions.workerEnabled!==true)});
   if(unified&&req.method==='GET'&&url.pathname.startsWith('/api/unified/')){const result=await unifiedRoute(unified,req.method,url,{},executor);if(result)return send(res,result.status,result.body);}
-  if(req.method==='GET'&&url.pathname==='/api/facebook'){const view=store.facebookView(url.searchParams.get('workspace'));return send(res,200,{...view,...(unified?unified.accountsView(url.searchParams.get('workspace')):{}),groupContent:view.groupContent.map(c=>({...c,platform_payloads:unified?.contentVariants(c.id)||{}})),sharedInteractionQuota:unified&&view.selectedAccountId?store.interactionBudget.status(url.searchParams.get('workspace'),view.selectedAccountId):null,runtimeMode:cloud?.mode||'local',executionConnected:localExecution,accounts:view.accounts.map(account=>({...account,api_enabled:apiEnabled(account)})),recommendedProfileDir:join(homedir(),'Library/Application Support/VietBridgeSocialOperatorV2/chrome-profiles',url.searchParams.get('workspace'))});}
+  if(req.method==='GET'&&url.pathname==='/api/facebook'){const view=store.facebookView(url.searchParams.get('workspace'));return send(res,200,{...view,...(unified?unified.accountsView(url.searchParams.get('workspace')):{}),groupContent:view.groupContent.map(c=>({...c,library_source:library?store.db.prepare("SELECT article_id,version,json_extract(source_json,'$.selection_revision') AS revision FROM group_library_imports WHERE content_id=? AND workspace=?").get(c.id,c.workspace)||null:null,platform_payloads:unified?.contentVariants(c.id)||{}})),sharedInteractionQuota:unified&&view.selectedAccountId?store.interactionBudget.status(url.searchParams.get('workspace'),view.selectedAccountId):null,runtimeMode:cloud?.mode||'local',executionConnected:localExecution,accounts:view.accounts.map(account=>({...account,api_enabled:apiEnabled(account)})),recommendedProfileDir:join(homedir(),'Library/Application Support/VietBridgeSocialOperatorV2/chrome-profiles',url.searchParams.get('workspace'))});}
   if(unified&&url.pathname.startsWith('/api/publication-verification')){
    if(req.method!=='GET')return send(res,409,{error:'统一版本的平台独立核对尚未接入，不会调用旧发布服务'});
    if(url.pathname!=='/api/publication-verification')return send(res,200,{supported:false,reason:'此平台尚未接入统一版本'});
@@ -90,9 +102,13 @@ export function createApp(dbPath=join(runtime?.dataDir||join(homedir(),'Library/
   }
   if(req.method==='GET'&&url.pathname==='/api/health')return send(res,200,{ok:true,version:'2.1.0-alpha.1',mode:'local-real-integration',persistent:true,v1Url:'http://127.0.0.1:17880/'});
   if(req.method==='POST'){
-   if(req.headers.origin!==origin||req.headers['x-local-token']!==token||req.headers['content-type']!=='application/json')throw Error('本地请求验证失败，请刷新页面');
+   if((principal?.type!=='app'&&(req.headers.origin!==origin||req.headers['x-local-token']!==token)||principal?.type==='app'&&req.headers.origin&&req.headers.origin!==origin)||!/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(req.headers['content-type']||''))throw Error('本地请求验证失败，请刷新页面');
    if((unified&&!executionEnabled||publisher&&publisherOptions.workerEnabled!==true)&&(/\/group-jobs\/auto-publish$|\/group-jobs\/[^/]+\/prepare$|\/engagement\/candidates\/[^/]+\/reserve$|\/proactive\/posts\/[^/]+\/execute$/.test(url.pathname)))return send(res,409,{error:'验收模式不执行真实社媒提交；请使用只读扫描和任务预览'});
    let raw='';for await(const c of req){raw+=c;if(raw.length>100000)throw Error('请求过大');}const input=JSON.parse(raw||'{}');
+   if(access&&url.pathname==='/api/access/password'){access.changePassword(input.current_password,input.new_password);res.setHeader('Set-Cookie','publisher_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');return send(res,200,{changed:true,login:'/login'});}
+   if(access&&url.pathname==='/api/access/tokens'){for(const ws of input.workspaces||[])store.requireWorkspace(ws);return send(res,201,access.createToken(input));}
+   if(access&&url.pathname==='/api/access/tokens/revoke'){access.revoke(input.id);return send(res,200,{revoked:true});}
+   if(access&&url.pathname==='/api/access/logout'){access.logout(req);res.setHeader('Set-Cookie','publisher_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');return send(res,200,{logout:true});}
    if(unified&&url.pathname.startsWith('/api/unified/')){const result=await unifiedRoute(unified,req.method,url,input,executor);if(result)return send(res,result.status,result.body);}
    if(url.pathname==='/api/workspaces')return send(res,input.id?200:201,store.saveWorkspace(input));
    if(url.pathname==='/api/local/pick-path'){
@@ -123,6 +139,7 @@ export function createApp(dbPath=join(runtime?.dataDir||join(homedir(),'Library/
    if(url.pathname.endsWith('/inbox/sync'))return send(res,200,await (unified?facebook.syncBrowserInbox(ws,input.account_id):engagement.sync(ws,input.account_id)));
    if(url.pathname.endsWith('/engagement/policy'))return send(res,200,store.saveEngagementPolicy(ws,input));
    if(url.pathname.endsWith('/proactive/settings'))return send(res,200,store.saveProactiveSettings(ws,input));
+   if(url.pathname.endsWith('/proactive/groups/toggle-bulk'))return send(res,200,{groups:store.setGroupProactiveBulk(ws,input.account_id,input.changes)});
    if(url.pathname.endsWith('/proactive/groups/toggle'))return send(res,200,store.setGroupProactive(ws,input.group_id,input.enabled));
    if(url.pathname.endsWith('/proactive/scan'))return send(res,200,await facebook.scanProactiveEngagement(ws,input.account_id));
    if(url.pathname.endsWith('/engagement/candidates/build'))return send(res,200,{candidates:store.buildEngagementCandidates(ws,input.account_id),quota:store.quotaStatus(ws,input.account_id)});

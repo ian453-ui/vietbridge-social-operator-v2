@@ -27,7 +27,7 @@ export function unifiedPublisherView(workspace,account,contents=[],profiles=[],a
       <label>标题<input name="title"></label><label>正文<textarea name="body" required></textarea></label>
       <label>媒体引用（每行一个）<textarea name="media"></textarea></label><button>保存内容版本</button>
     </form>
-    <label>选择共享内容<select id="unified-content">${contents.map(c=>`<option value="${esc(c.id)}">${esc(c.title||c.id)}</option>`).join('')}</select></label>
+    <button type="button" id="unified-recommend-next">推荐下一篇未发布内容</button><label>选择共享内容<select id="unified-content">${contents.map(c=>`<option value="${esc(c.id)}">${esc(c.title||c.id)}</option>`).join('')}</select></label>
     <label>本平台标题<input id="unified-payload-title"></label><label>本平台正文／公众号 Markdown<textarea id="unified-payload-body"></textarea></label><label>话题（每行一个，不带 #）<textarea id="unified-payload-tags"></textarea></label><label>公众号作者<input id="unified-payload-author" value="驻越经营实录"></label>
     <button id="unified-create" ${(!account.platform||account.platform==='facebook')&&account.identity_type!=='PAGE'||!contents.length?'disabled':''}>创建${account.platform==='wechat_official_account'?'草稿':'发布'}预览</button>
     <label><input type="checkbox" id="unified-all-accounts">查看当前客户全部账号的任务</label>
@@ -105,6 +105,13 @@ export async function mountUnifiedPublisher({workspace,account,token,executionEn
   };
   const select=root.querySelector('#unified-content');
   const fillPayload=()=>{const content=contents.find(c=>c.id===select.value),p=content?.platform_payloads?.[account.platform]||content||{};root.querySelector('#unified-payload-title').value=p.title||'';root.querySelector('#unified-payload-body').value=p.body||'';root.querySelector('#unified-payload-tags').value=(p.tags||[]).join('\n');root.querySelector('#unified-payload-author').value=p.author||'驻越经营实录';};select.onchange=fillPayload;fillPayload();
+  let publicationStates;
+  const recommend=async(auto=false)=>{const result=await request('/accounts/'+encodeURIComponent(account.id)+'/content-status');if(!root.isConnected)return;publicationStates=result.states;for(const option of select.options){const row=contents.find(c=>c.id===option.value),states=publicationStates[option.value]||[];option.textContent=(row?.title||option.value)+(states.includes('PUBLISHED')?' · 已发布':states.includes('DRAFT_WRITTEN')?' · 草稿已写入':states.includes('PUBLISHED_ID_PENDING')?' · 列表已确认/ID待核对':states.some(s=>['PREPARING','SUBMITTING','UNKNOWN','READY'].includes(s))?' · 执行中/待核对':' · 无已确认发布记录');}if(auto&&select.dataset.userPicked)return;const next=[...contents].sort((a,b)=>String(a.title||'').localeCompare(String(b.title||''),'zh',{numeric:true})).find(c=>!(publicationStates[c.id]||[]).some(s=>['PUBLISHED','DRAFT_WRITTEN','PUBLISHED_ID_PENDING','PREPARING','SUBMITTING','UNKNOWN','READY'].includes(s)));if(next){select.value=next.id;fillPayload();}else if(!auto)status.textContent='没有可推荐的未发布内容；已发布项仍可手工选择。';};
+  select.addEventListener('change',()=>select.dataset.userPicked='true');
+  root.querySelectorAll('#unified-payload-title,#unified-payload-body,#unified-payload-tags,#unified-payload-author').forEach(input=>input.addEventListener('input',()=>select.dataset.userPicked='true'));
+  
+  root.querySelector('#unified-recommend-next').onclick=event=>run(event.currentTarget,()=>recommend());
+  recommend(true).catch(error=>{if(root.isConnected)status.textContent=error.message;});
   root.querySelector('#unified-create').onclick=event=>run(event.currentTarget,async()=>{
     await request('/jobs',{account_id:account.id,content_id:select.value,payload:{title:root.querySelector('#unified-payload-title').value,body:root.querySelector('#unified-payload-body').value,tags:root.querySelector('#unified-payload-tags').value.split('\n').map(s=>s.trim()).filter(Boolean),author:root.querySelector('#unified-payload-author').value}});await loadJobs();
   });
