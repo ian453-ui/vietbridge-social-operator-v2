@@ -1,6 +1,8 @@
 import {executionScope} from './single-execution-permit.js';
 /** Authenticated parent server calls this only after Host/auth/Origin/CSRF validation. */
 export function unifiedRoute(publisher, method, url, input={},executor=null) {
+  const diagnostic=url.pathname.match(/^\/api\/unified\/workspaces\/([^/]+)\/jobs\/([^/]+)\/diagnostics$/);
+  if(diagnostic){if(!executor?.diagnostics)throw Error('只读诊断未接入');const ws=decodeURIComponent(diagnostic[1]),id=decodeURIComponent(diagnostic[2]);if(method==='GET')return {status:200,body:executor.diagnostics.view(ws,id)};if(method==='POST')return {status:202,body:executor.diagnostics.start(ws,id,input)};return {status:405,body:{error:'METHOD_NOT_ALLOWED'}};}
   const capability=url.pathname.match(/^\/api\/unified\/workspaces\/([^/]+)\/jobs\/([^/]+)\/execution-capability$/);
   if(capability){if(method!=='GET')return {status:405,body:{error:'METHOD_NOT_ALLOWED'}};if(!executor)throw Error('执行器未接入');const workspace=decodeURIComponent(capability[1]),id=decodeURIComponent(capability[2]),job=publisher.job(workspace,id);return {status:200,body:{...executor.executionCapability(workspace,id),scope:executionScope(job),state:job.state,attemptId:job.attempt_id}};}
   const contentStatus=url.pathname.match(/^\/api\/unified\/workspaces\/([^/]+)\/accounts\/([^/]+)\/content-status$/);

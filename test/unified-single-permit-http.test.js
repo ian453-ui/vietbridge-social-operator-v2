@@ -59,5 +59,16 @@ test('authenticated per-job capability coexists with disabled global publishing 
     const result=await request(execute,{},headers);assert.equal(result.status,200);assert.equal(result.data.state,'PUBLISHED');assert.equal(submits,1);
     assert.equal((await request(exact)).data.canExecute,false);assert.equal((await request(exact)).data.permitStatus,'CONSUMED');
     assert.equal((await request(execute,{},headers)).status,409);assert.equal(creates,1);assert.equal(submits,1);
+    // Diagnostic authorization is independently guarded and never re-executes the historical task.
+    reader.db.prepare("UPDATE publisher_jobs SET state='UNKNOWN' WHERE id=?").run(job.id);
+    const historical=JSON.stringify(reader.db.prepare('SELECT * FROM publisher_jobs WHERE id=?').get(job.id)),diag=base+`/jobs/${job.id}/diagnostics`;
+    assert.equal((await request(diag,undefined,{})).status,401);assert.equal((await request(diag,{snapshot_hash:job.snapshot_hash},auth)).status,409);
+    assert.equal((await request(diag,{snapshot_hash:job.snapshot_hash},{...headers,origin:'https://evil.example'})).status,409);
+    assert.equal((await request(diag,undefined,{authorization:'Bearer '+token})).status,403);
+    assert.equal((await request(diag,{snapshot_hash:'wrong'},headers)).status,409);
+    assert.equal((await request(diag,{snapshot_hash:job.snapshot_hash},headers)).status,202);
+    let diagnostic;for(let i=0;i<20;i++){diagnostic=(await request(diag)).data;if(diagnostic.state==='DONE')break;}
+    assert.equal(diagnostic.state,'DONE');assert.equal(diagnostic.result.conclusion,'BLOCKED'); // mock has no diagnose method
+    assert.equal(JSON.stringify(reader.db.prepare('SELECT * FROM publisher_jobs WHERE id=?').get(job.id)),historical);assert.equal(submits,1);
   } finally {reader?.close();server.emit('close');rmSync(root,{recursive:true,force:true});}
 });

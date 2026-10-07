@@ -131,7 +131,7 @@ export async function mountUnifiedPublisher({workspace,account,token,executionEn
       <details><summary>核对冻结正文与媒体</summary><pre>${esc(job.snapshot.body)}</pre><pre>${esc(job.snapshot.media.join('\n'))}</pre></details>
       ${job.state==='DRAFT'?`<button data-approve="${esc(job.id)}">确认此版本</button>`:''}
       ${executionButton(wasAttempted(job)?{...job,canExecute:false,execution:{...job.execution,reason:'本页面已发送一次执行请求；只读核对结果，不自动重试'}}:job)}
-      ${job.state==='UNKNOWN'?`<label>平台作品 ID（缺回执时填写）<input data-platform-id="${esc(job.id)}"></label><button data-reconcile="${esc(job.id)}">只读核对平台结果</button>`:''}
+      ${job.state==='UNKNOWN'?`<label>平台作品 ID（缺回执时填写）<input data-platform-id="${esc(job.id)}"></label><button data-reconcile="${esc(job.id)}">只读核对平台结果</button>${job.snapshot.platform==='facebook'&&job.snapshot.transport==='BROWSER'?`<button data-diagnose="${esc(job.id)}">只读诊断（保留现场，不改任务）</button><button data-diagnostic-refresh="${esc(job.id)}">读取诊断进度与证据</button><pre data-diagnostic-report="${esc(job.id)}" role="status" aria-live="polite"></pre>`:''}`:''}
       ${job.state==='UNKNOWN'&&job.evidence.stage==='PREPARING'&&!job.evidence.submissionIntent?`<button data-resolve-preparation="${esc(job.id)}">人工核对准备中断（没有最终提交）</button>`:''}
       ${job.state==='BLOCKED'?`<button data-reopen="${esc(job.id)}">修复条件后重新审核</button>`:''}
       ${job.evidence.url?`<a target="_blank" rel="noopener" href="${esc(job.evidence.url)}">查看平台作品</a>`:''}
@@ -147,6 +147,9 @@ export async function mountUnifiedPublisher({workspace,account,token,executionEn
     }));
     jobs.querySelectorAll('[data-resolve-preparation]').forEach(button=>button.onclick=()=>run(button,async()=>{if(!window.confirm('准备上传可能已产生临时对象。确认已检查现场，并仅恢复到阻断待审核状态？不会删除平台数据或自动重试。'))return;await request(`/jobs/${encodeURIComponent(button.dataset.resolvePreparation)}/resolve-preparation`,{acknowledge_preparation_effects:true});await loadJobs();}));
     jobs.querySelectorAll('[data-execute]').forEach(button=>button.onclick=()=>showConfirmation(button,result.jobs.find(j=>j.id===button.dataset.execute)));
+    async function diagnosticProgress(id){const value=await request(`/jobs/${encodeURIComponent(id)}/diagnostics`);if(root.isConnected){const box=jobs.querySelector(`[data-diagnostic-report="${id}"]`);if(box)box.textContent=JSON.stringify(value,null,2);}return value;}
+    jobs.querySelectorAll('[data-diagnostic-refresh]').forEach(button=>button.onclick=()=>run(button,()=>diagnosticProgress(button.dataset.diagnosticRefresh)));
+    jobs.querySelectorAll('[data-diagnose]').forEach(button=>button.onclick=()=>run(button,async()=>{const job=result.jobs.find(j=>j.id===button.dataset.diagnose);await request(`/jobs/${encodeURIComponent(job.id)}/diagnostics`,{snapshot_hash:job.snapshot_hash});for(let i=0;i<45&&root.isConnected&&button.isConnected;i++){const value=await diagnosticProgress(job.id);if(value.state!=='RUNNING')return;await new Promise(resolve=>setTimeout(resolve,2000));}if(root.isConnected)status.textContent='诊断仍在运行或页面已切换；只读取进度，不会再次启动。';},{enableAfter:false}));
     for(const action of ['reconcile','reopen'])jobs.querySelectorAll(`[data-${action}]`).forEach(button=>button.onclick=()=>run(button,async()=>{
       const id=button.dataset[action];
       const job=result.jobs.find(j=>j.id===id);

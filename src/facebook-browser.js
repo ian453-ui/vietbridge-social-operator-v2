@@ -3,6 +3,7 @@ import {request} from 'node:http';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {groupNameMatches} from './group-filters.js';
+import {boundedDiagnosticCleanup} from './facebook-readonly-diagnostics.js';
 
 const CHROME='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const execFileAsync=promisify(execFile);
@@ -30,6 +31,21 @@ export class FacebookBrowser {
       this.health(account.id,matches?'HEALTHY':'WRONG_IDENTITY',matches);
       return {healthy:matches,actualIdentity:identity,externalId,url,title,identityEvidence:'CURRENT_ACTOR_MENU_AND_ME_URL',blocker:matches?null:'WRONG_IDENTITY'};
     }finally{await browser.close();}
+  }
+  async assertDiagnosticProfile(snapshot){
+    const account=this.store.account(snapshot.workspace,snapshot.accountId),profile=this.profile(snapshot.workspace,snapshot.profileId);
+    if(account.profile_id!==profile.id||profile.cdp_port!==snapshot.cdpPort||profile.user_data_dir!==snapshot.profileDir||account.external_id!==snapshot.operatorActorId)throw Error('只读诊断的冻结账号或执行环境不匹配');
+    if(!await cdpReady(profile.cdp_port)||!await portMatchesProfile(profile))throw Error('只读诊断端口未就绪或不属于冻结专用目录');
+  }
+  async inspectDiagnostic(snapshot,context){
+    const account=this.store.account(snapshot.workspace,snapshot.accountId),page=await context.newPage();
+    try{
+      await page.goto('https://www.facebook.com/me',{waitUntil:'domcontentloaded',timeout:7000});
+      const url=page.url();if(/login|checkpoint/i.test(url)||await page.locator('input[name="email"],input[name="pass"]').count())throw Error('只读诊断需登录或安全验证，不会代填凭据');
+      const actualIdentity=await currentActorName(page,3000),externalId=profileIdFromUrl(url);
+      if(!identityMatches(actualIdentity,externalId,account)||externalId!==snapshot.operatorActorId)throw Error('只读诊断实际操作身份未核实或不一致');
+      return {healthy:true,actualIdentity,externalId,targetPageId:snapshot.targetPageId,method:'ISOLATED_ME_ACTOR_READBACK'};
+    }finally{await boundedDiagnosticCleanup(()=>page.close(),1500);}
   }
   async discoverGroups(workspace,accountId){
     const account=this.store.account(workspace,accountId),profile=this.profile(workspace,account.profile_id);
@@ -434,16 +450,16 @@ async function portMatchesProfile(profile){try{const {stdout}=await execFileAsyn
 function normalize(x){return String(x||'').replace(/\s+/g,' ').trim();}
 export function profileIdFromUrl(value){try{const u=new URL(value);if(!/^(www\.)?facebook\.com$/.test(u.hostname))return null;return u.pathname==='/profile.php'?u.searchParams.get('id'):null;}catch{return null;}}
 export function identityMatches(name,id,account){return normalize(name)===normalize(account.expected_identity)&&Boolean(id)&&(!account.external_id||String(account.external_id)===String(id));}
-async function currentActorName(page){
+async function currentActorName(page,timeout=15000){
   const trigger=page.getByRole('button',{name:/^(Your profile|你的个人主页|你的个人资料|你的主页|账户|账号|Trang cá nhân của bạn|Hồ sơ của bạn|Tài khoản)$/i}).first();
-  if(!await trigger.waitFor({state:'visible',timeout:15000}).then(()=>true).catch(()=>false))return '';
+  if(!await trigger.waitFor({state:'visible',timeout}).then(()=>true).catch(()=>false))return '';
   const opened=await trigger.getAttribute('aria-expanded')!=='true';
   try{
-    if(opened)await trigger.click();
+    if(opened)await trigger.click({timeout});
     const me=page.getByRole('dialog').locator('a[href="/me/"],a[href="/me"],a[href="https://www.facebook.com/me/"],a[href="https://www.facebook.com/me"]').first();
-    await me.waitFor({state:'visible',timeout:15000});
+    await me.waitFor({state:'visible',timeout});
     return normalize(await me.innerText());
-  }catch{return '';}finally{if(opened)await trigger.click().catch(()=>{});}
+  }catch{return '';}finally{if(opened)await trigger.click({timeout}).catch(()=>{});}
 }
 async function findPublishedPostUrl(page,groupUrl,body,timeout,account){
   const deadline=Date.now()+timeout;
