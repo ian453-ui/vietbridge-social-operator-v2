@@ -35,6 +35,8 @@ test('authenticated per-job capability coexists with disabled global publishing 
     const exact=base+`/jobs/${job.id}/execution-capability`;
     assert.equal((await request(exact,undefined,{})).status,401);
     assert.equal((await request(exact)).data.canExecute,true);
+    assert.deepEqual((await request(exact)).data.scope,executionScope(job));
+    assert.equal((await request(exact)).data.state,'READY');assert.equal((await request(exact)).data.attemptId,null);
     assert.equal((await request(base+'/jobs')).data.jobs[0].canExecute,true);
     const capabilities=(await request('/api/automation/capabilities')).data;
     assert.equal(capabilities.scoped_execution.global_execution_enabled,false);assert.equal(capabilities.operations.submit_platform_task.supported,false);assert.equal(capabilities.operations.submit_to_facebook.supported,false);
