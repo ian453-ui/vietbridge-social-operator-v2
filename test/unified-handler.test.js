@@ -23,7 +23,7 @@ test('unified production handler preserves auth and CSRF and creates scoped nati
     assert.equal((await request('/api/state',undefined,{...auth,host:'wrong.example'})).status,409);
     const state=(await request('/api/state')).json();assert.equal(state.unified,true);assert.deepEqual(state.workspaces,[]);
     assert.equal((await request('/api/health',undefined,{})).status,401);
-    const health=(await request('/api/health')).json();assert.equal(health.version,'2.3.0-alpha.1');assert.equal(health.mode,'publisher-unified');assert.equal(health.executionEnabled,false);
+    const health=(await request('/api/health')).json();assert.equal(health.version,'2.3.0-alpha.2');assert.equal(health.mode,'publisher-unified');assert.equal(health.executionEnabled,false);
     assert.equal((await request('/api/automation/capabilities',undefined,{})).status,401);
     const capability=(await request('/api/automation/capabilities')).json();
     assert.equal(capability.transport,'AUTHENTICATED_BROWSER_UI');

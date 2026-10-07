@@ -81,6 +81,14 @@ export class UnifiedPublisher {
     const saved=this.db.prepare("SELECT value FROM workspace_preferences WHERE workspace=? AND key='selected_publisher_account'").get(workspace)?.value;
     return {publisherAccounts,selectedPublisherAccountId:publisherAccounts.find(x=>x.id===saved&&x.enabled)?.id||publisherAccounts.find(x=>x.enabled)?.id||null};
   }
+  contentStatus(workspace,id){
+    const account=this.account(workspace,id);
+    const rows=account.platform==='facebook'
+      ?this.db.prepare("SELECT content_id,state FROM publisher_jobs WHERE workspace=? AND coalesce(json_extract(snapshot_json,'$.platform'),'facebook')='facebook' AND (json_extract(snapshot_json,'$.targetPageId')=? OR json_extract(snapshot_json,'$.targetPageId') IS NULL AND json_extract(snapshot_json,'$.externalId') IN (?,?))").all(workspace,account.target_page_id,account.external_id,account.target_page_id)
+      :this.db.prepare("SELECT content_id,state FROM publisher_jobs WHERE workspace=? AND json_extract(snapshot_json,'$.platform')=? AND json_extract(snapshot_json,'$.externalId')=?").all(workspace,account.platform,account.external_id);
+    const states={};for(const row of rows)(states[row.content_id]||=[]).push(row.state);
+    return {states};
+  }
   selectAccount(workspace,id){const account=this.account(workspace,id);this.db.prepare("INSERT INTO workspace_preferences VALUES(?,'selected_publisher_account',?,?) ON CONFLICT(workspace,key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").run(workspace,id,new Date().toISOString());return account;}
   savePlatformAccount(workspace,input){
     this.store.requireWorkspace(workspace);

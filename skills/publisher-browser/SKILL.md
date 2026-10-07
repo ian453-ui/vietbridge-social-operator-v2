@@ -1,6 +1,6 @@
 ---
 name: publisher-browser
-version: 1.1.0
+version: 1.2.0
 description: Let dot operate the unified Publisher through its authenticated browser UI, with explicit account scope and verifiable task results.
 ---
 
@@ -39,3 +39,9 @@ Record blockers specifically: unavailable deployment, login required, missing ac
 Facebook freezes `operatorActorId` (browser /me identity) and `targetPageId` (Business/Graph asset) separately. They may legitimately differ; never bind V2 to V1 or substitute one ID for the other. API/BROWSER remains a manual Facebook-only choice; other platforms use their configured executor. Confirm exact platform/title/body/tags/media before approval. Existing local config paths are references only; do not read secret contents.
 
 Xiaohongshu supports image or single video; WeChat Official Account writes drafts only (`DRAFT_WRITTEN`, never public publication); WeChat Channels uses its dedicated browser and may return `PUBLISHED_ID_PENDING` without a public link. `submit_platform_task.supported` is the runtime execution gate. All real uploads/submissions remain outside this integration-test authorization. Interrupted preparation with no final submission intent requires explicit human acknowledgment through the UI before return to review; already submitted UNKNOWN requires readback and cannot be reset this way.
+
+## Login, all-selection and recommendation (2.3.0-alpha.2)
+
+Publisher uses the normal /login form and authenticated browser session. The user enters/saves their own password; never retrieve it from Keychain or transmit it to Cloud/Slack. “登录与应用” configures password/app access. A forgotten password is reset only when the user enters and confirms it through the reviewed Mac local helper; do not generate or set one autonomously. Server applications may receive separate customer-scoped expiring Bearer tokens via the administrator, not the administrator password. They can read/import/create pending tasks only, not approve/execute or change configuration. Treat one-time token displays as secrets and do not copy them into chat, logs or evidence.
+
+All/clear controls select current eligible visible groups/contents; radar processes selected groups in bounded sequential batches and stops on context changes or errors. Proactive all-selection is staged; saving group switches is separate from any scan/interaction. Next-article recommendations are UI suggestions, never publication authorization. Previously published items/pairs remain selectable with labels, but duplicate/UNKNOWN guards still apply. Verify exact customer/account/content/target after any recommendation. Do not bulk approve action switches or bypass validation of unavailable items.
