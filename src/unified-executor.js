@@ -136,7 +136,8 @@ export class UnifiedExecutor {
       const evidence=await driver.readback(job.snapshot,receipt);
       this.complete(workspace,id,evidence);
     } catch(error) {
-      if(job){const current=this.publisher.job(workspace,id);if(['PREPARING','SUBMITTING'].includes(current.state))this.db.prepare('UPDATE publisher_jobs SET state=?,evidence_json=?,updated_at=? WHERE id=?').run(current.state==='SUBMITTING'||this.db.prepare('SELECT 1 FROM publisher_prepare_intents WHERE job_id=?').get(id)?'UNKNOWN':'BLOCKED',JSON.stringify({error:safeError(error),stage:current.state,submissionIntent:current.state==='SUBMITTING'}),new Date().toISOString(),id);}
+      let browserDiagnostics;try{browserDiagnostics=driver?.failureEvidence?.();}catch{/* Diagnostic collection must not mask the original uncertain outcome. */}
+      if(job){const current=this.publisher.job(workspace,id);if(['PREPARING','SUBMITTING'].includes(current.state))this.db.prepare('UPDATE publisher_jobs SET state=?,evidence_json=?,updated_at=? WHERE id=?').run(current.state==='SUBMITTING'||this.db.prepare('SELECT 1 FROM publisher_prepare_intents WHERE job_id=?').get(id)?'UNKNOWN':'BLOCKED',JSON.stringify({error:safeError(error),stage:current.state,submissionIntent:current.state==='SUBMITTING',browserDiagnostics}),new Date().toISOString(),id);}
       throw Error(safeError(error));
     } finally {
       try{await driver?.close();}finally{try{release?.();}finally{this.active.delete(profile);}}

@@ -23,7 +23,7 @@ function setup(t) {
   let creates=0,submits=0,failAt='',now=Date.now(),executor;
   const driver={async prepare(s,assets,before){if(failAt==='beforePrepare')throw Error('before prepare');before();if(failAt==='prepare')throw Error('prepare connection lost');return {identityVerified:true};},
     async submit(){submits++;if(failAt==='submit')throw Error('submit outcome unknown');return {id:'fixture-post',url:'https://www.facebook.com/61594159443807/posts/999'};},
-    async readback(s){if(failAt==='readback')throw Error('independent readback unavailable');return {verified:true,id:'fixture-post',url:'https://www.facebook.com/61594159443807/posts/999',operatorActorId:s.operatorActorId,targetPageId:s.targetPageId,contentHash:s.contentHash,payloadHash:s.payloadHash};},async close(){}};
+    async readback(s){if(failAt==='readback')throw Error('independent readback unavailable');return {verified:true,id:'fixture-post',url:'https://www.facebook.com/61594159443807/posts/999',operatorActorId:s.operatorActorId,targetPageId:s.targetPageId,contentHash:s.contentHash,payloadHash:s.payloadHash};},failureEvidence(){return {phase:failAt,buttonVisible:false,finalClickAttempted:failAt==='submit'};},async close(){}};
   const options={enabled:false,resources:new BrowserResources(join(root,'locks')),snapshotRoot:join(root,'media'),mediaRoots:[root],drivers:{create:async()=>{
     creates++;assert.equal(store.db.isTransaction,false);const permit=executor.permits.record(job.id);assert.equal(permit.status,'CONSUMED');assert.equal(publisher.job(workspace.id,job.id).state,'PREPARING');assert.equal(permit.attempt_id,publisher.job(workspace.id,job.id).attempt_id);return driver;}}};
   executor=new UnifiedExecutor(publisher,options);executor.permits.now=()=>now;executor.approve(workspace.id,job.id,job.snapshot_hash);
@@ -75,6 +75,7 @@ for(const stage of ['beforePrepare','prepare','submit','readback'])test(`consume
   const f=setup(t);f.grant();f.failAt=stage;
   await assert.rejects(()=>f.executor.execute(f.workspace.id,f.job.id));
   const state=stage==='beforePrepare'?'BLOCKED':'UNKNOWN';assert.equal(f.publisher.job(f.workspace.id,f.job.id).state,state);
+  assert.equal(f.publisher.job(f.workspace.id,f.job.id).evidence.browserDiagnostics.phase,stage);
   assert.equal(f.executor.executionCapability(f.workspace.id,f.job.id).permitStatus,'CONSUMED');
   const second=f.reopen();assert.equal(second.executor.executionCapability(f.workspace.id,f.job.id).canExecute,false);
   await assert.rejects(()=>second.executor.execute(f.workspace.id,f.job.id));assert.equal(f.creates,1);
