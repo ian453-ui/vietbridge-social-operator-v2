@@ -4,9 +4,10 @@ import {mkdtempSync,rmSync,readFileSync,statSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {Readable} from 'node:stream';
-import {PublisherAccess} from '../src/publisher-access.js';
+import {PublisherAccess,passwordRecord} from '../src/publisher-access.js';
 import {createApp} from '../src/server.js';
 const password='disposable-test-password-at-least-24';
+test('six-character passwords are accepted and shorter passwords are rejected',()=>{assert.doesNotThrow(()=>passwordRecord('123456'));assert.throws(()=>passwordRecord('12345'),/6至512/);});
 test('login and application settings are reachable before selecting a customer',()=>{const client=readFileSync(new URL('../src/client.js',import.meta.url),'utf8');assert.match(client,/\['access','v1','customers','verification'\]\.includes\(route\)/);assert.match(client,/route==='access'\?'登录与应用'/);});
 function fixture(t){const root=mkdtempSync(join(tmpdir(),'vb-access-'));t.after(()=>rmSync(root,{recursive:true,force:true}));const config={mode:'mac-tunnel',executionConnected:true,origin:'https://publisher.vietbridge.one',host:'publisher.vietbridge.one',user:'admin',password,dataDir:root,accessFile:join(root,'publisher-access.json')};return {root,config,access:new PublisherAccess(config)};}
 test('browser sessions expire; password rotation invalidates sessions and old Basic credentials and persists only hashes',t=>{const f=fixture(t);let now=1;f.access.now=()=>now;const session=f.access.login('admin',password),request={headers:{cookie:'publisher_session='+session}};assert.equal(f.access.authenticate(request).type,'admin');now+=13*3600000;assert.equal(f.access.authenticate(request),null);const current=f.access.login('admin',password);f.access.changePassword(password,password+'-new');assert.equal(f.access.authenticate({headers:{cookie:'publisher_session='+current}}),null);assert.equal(f.access.authenticate({headers:{authorization:'Basic '+Buffer.from('admin:'+password).toString('base64')}}),null);const raw=readFileSync(f.config.accessFile,'utf8');assert.ok(!raw.includes(password));assert.equal(statSync(f.config.accessFile).mode&0o077,0);assert.ok(new PublisherAccess({...f.config,password:''}).validPassword('admin',password+'-new'));});

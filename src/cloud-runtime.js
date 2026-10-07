@@ -9,7 +9,7 @@ export function cloudRuntime(env=process.env){
  const accessFile=env.ADMIN_ACCESS_FILE||(env.DATA_DIR?join(env.DATA_DIR,'publisher-access.json'):null);
  if(accessFile&&!isAbsolute(accessFile))throw Error('ADMIN_ACCESS_FILE 必须为绝对路径');
  const saved=accessFile?readAccessFile(accessFile):null;
- if(!saved&&password.length<24)throw Error('ADMIN_PASSWORD 至少24个字符；或使用本地密码设置入口');
+ if(!saved&&password.length<6)throw Error('ADMIN_PASSWORD 至少6个字符；或使用本地密码设置入口');
  if(!env.DATA_DIR?.startsWith('/'))throw Error('DATA_DIR 必须为绝对路径');
  if(env.PUBLISHER_MODE==='mac-tunnel'&&origin.hostname!=='publisher.vietbridge.one')throw Error('Mac Tunnel 唯一外网域名必须为 publisher.vietbridge.one');
  return {mode:env.PUBLISHER_MODE,executionConnected:env.PUBLISHER_MODE==='mac-tunnel',origin:origin.origin,host:origin.host,password,user:env.ADMIN_USER||'admin',dataDir:env.DATA_DIR,accessFile};
@@ -21,4 +21,3 @@ export function authenticate(req,res,config){
  res.writeHead(401,{'WWW-Authenticate':'Basic realm="VietBridge", charset="UTF-8"','Cache-Control':'no-store'});
  res.end('请登录 VietBridge 管理后台');return false;
 }
-

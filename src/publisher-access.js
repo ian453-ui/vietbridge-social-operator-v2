@@ -2,7 +2,7 @@ import {randomBytes,scryptSync,timingSafeEqual,createHash} from 'node:crypto';
 import {existsSync,readFileSync,writeFileSync,renameSync,statSync,mkdirSync} from 'node:fs';
 import {dirname,join} from 'node:path';
 const hash=s=>createHash('sha256').update(s).digest('hex');
-export function passwordRecord(password){if(typeof password!=='string'||password.length<24||password.length>512)throw Error('密码需要24至512个字符');const salt=randomBytes(16).toString('hex');return {salt,hash:scryptSync(password,salt,64).toString('hex')};}
+export function passwordRecord(password){if(typeof password!=='string'||password.length<6||password.length>512)throw Error('密码需要6至512个字符');const salt=randomBytes(16).toString('hex');return {salt,hash:scryptSync(password,salt,64).toString('hex')};}
 export function passwordMatches(password,record){if(typeof password!=='string'||password.length>512||!record||! /^[a-f0-9]{32}$/.test(record.salt||'')||! /^[a-f0-9]{128}$/.test(record.hash||''))return false;return timingSafeEqual(scryptSync(password,record.salt,64),Buffer.from(record.hash,'hex'));}
 export function readAccessFile(path){if(!existsSync(path))return null;const info=statSync(path);if(!info.isFile()||(info.mode&0o077))throw Error('登录配置必须是已有私有文件');const value=JSON.parse(readFileSync(path,'utf8'));if(value.version!==1||!value.user||! /^[a-f0-9]{128}$/.test(value.password?.hash||'')||! /^[a-f0-9]{32}$/.test(value.password?.salt||'')||!Array.isArray(value.tokens))throw Error('登录配置格式无效');return value;}
 export function writeAccessFile(path,value){mkdirSync(dirname(path),{recursive:true});const temp=join(dirname(path),'.publisher-access-'+randomBytes(16).toString('hex'));writeFileSync(temp,JSON.stringify(value),{mode:0o600,flag:'wx'});renameSync(temp,path);}
