@@ -19,6 +19,7 @@ import {UnifiedPublisher} from './unified-publisher.js';
 import {unifiedRoute} from './unified-http.js';
 import {publisherAutomationCapabilities} from './publisher-automation.js';
 import {UnifiedExecutor} from './unified-executor.js';
+import {PublisherDiagnostics} from './publisher-diagnostics.js';
 import {unifiedDrivers} from './unified-drivers.js';
 import {BrowserResources} from './browser-resources.js';
 import {ScanScheduler} from './scan-scheduler.js';
@@ -39,6 +40,7 @@ export function createApp(dbPath=join(runtime?.dataDir||join(homedir(),'Library/
   return imported?roots.concat(job.snapshot.media.map(path=>dirname(path))):roots;
  }}):null;
  if(unified)facebook.resources=executor.resources;
+ if(unified){executor.diagnostics=new PublisherDiagnostics(executor);if(options.recoverStartup)executor.diagnostics.recover();}
  const scheduler=unified&&options.scanScheduler?new ScanScheduler(store,facebook).start():null;
  const publisher=publisherOptions?new PublisherIntegration(store,{...publisherOptions,operatorDbPath:dbPath}):null;
  if(publisher)facebook.resources=publisher.resources;

@@ -3,6 +3,7 @@ import {FacebookMcpConnector,assertFacebookReady} from './publisher-core/faceboo
 import {FacebookVideo,verifiedFacebookVideo} from './publisher-core/facebook-video.ts';
 import {normalizeLocalConfig,parseConfig} from './publisher-core/facebook-accounts.ts';
 import {XiaohongshuPublishDriver,WechatDraftPublishDriver,WechatChannelsPublishDriver} from './multiplatform-drivers.js';
+import {runFacebookDiagnostic,boundedDiagnosticCleanup} from './facebook-readonly-diagnostics.js';
 
 const clean=x=>String(x||'').replace(/\s+/g,' ').trim();
 function assertIdentities(s){if(!/^\d+$/.test(s.operatorActorId||'')||!/^\d+$/.test(s.targetPageId||'')||s.externalId!==s.operatorActorId)throw Error('操作 actor 与目标 Page 必须独立冻结');}
@@ -60,6 +61,12 @@ export class BrowserDriver {
   constructor(snapshot,facebook,{browser}={}){assertIdentities(snapshot);this.snapshot=snapshot;this.facebook=facebook;this.browser=browser||new FacebookBusinessBrowser({id:snapshot.accountId,display_name:snapshot.expectedIdentity,page_id:snapshot.targetPageId,page_name:snapshot.expectedIdentity,enabled:1,config_url:'',updated_at:''},snapshot.cdpPort,snapshot.operatorActorId);}
   async identity(){const checked=await this.facebook.inspect(this.snapshot.workspace,this.snapshot.accountId,{leaseHeld:true});if(!checked.healthy||checked.externalId!==this.snapshot.operatorActorId)throw Error('浏览器实际操作身份与任务不匹配');}
   async inspect(){await this.identity();return {healthy:true,externalId:this.snapshot.externalId};}
+  async diagnose(snapshot,progress){
+    await this.facebook.assertDiagnosticProfile(snapshot);await this.browser.connect();
+    const context=this.browser.diagnosticContext();
+    return runFacebookDiagnostic({context,snapshot,identity:()=>this.facebook.inspectDiagnostic(snapshot,context),progress});
+  }
+  async closeDiagnostic(){await boundedDiagnosticCleanup(()=>this.browser.close(),4000);}
   async prepare(snapshot,assets,onWrite=()=>{}){
     await this.identity();await this.browser.connect();
     if(await this.browser.publishedMatch(snapshot.body))throw Error('平台已存在相同内容，未重复提交');

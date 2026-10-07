@@ -20,6 +20,7 @@ export class FacebookBusinessBrowser {
   private readonly browserPageId:string;
   constructor(account:FacebookAccount,port:number,browserPageId:string){this.account=account;this.port=port;this.browserPageId=browserPageId}
   async connect():Promise<void>{this.browser=await chromium.connectOverCDP(`http://127.0.0.1:${this.port}`,{noDefaults:true,timeout:12000});if(!this.browser.contexts()[0])throw Error('Facebook 浏览器会话未就绪');}
+  diagnosticContext(){if(!this.browser)throw Error('只读诊断会话未连接');return this.browser.contexts()[0];}
   private async page(url:string):Promise<Page>{if(!this.browser)throw Error('Facebook 浏览器未连接');const page=await this.browser.contexts()[0].newPage();try{await page.goto(url,{waitUntil:'domcontentloaded',timeout:30000});return page}catch(error){await page.close();throw error}}
   private listUrl():string{return `https://business.facebook.com/latest/posts/published_posts/?asset_id=${this.account.page_id}`}
   private composerUrl():string{return `https://business.facebook.com/latest/composer?asset_id=${this.account.page_id}`}
