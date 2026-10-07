@@ -1,5 +1,7 @@
 /** Authenticated parent server calls this only after Host/auth/Origin/CSRF validation. */
 export function unifiedRoute(publisher, method, url, input={},executor=null) {
+  const capability=url.pathname.match(/^\/api\/unified\/workspaces\/([^/]+)\/jobs\/([^/]+)\/execution-capability$/);
+  if(capability){if(method!=='GET')return {status:405,body:{error:'METHOD_NOT_ALLOWED'}};if(!executor)throw Error('执行器未接入');return {status:200,body:executor.executionCapability(decodeURIComponent(capability[1]),decodeURIComponent(capability[2]))};}
   const contentStatus=url.pathname.match(/^\/api\/unified\/workspaces\/([^/]+)\/accounts\/([^/]+)\/content-status$/);
   if(contentStatus){if(method!=='GET')return {status:405,body:{error:'METHOD_NOT_ALLOWED'}};return {status:200,body:publisher.contentStatus(decodeURIComponent(contentStatus[1]),decodeURIComponent(contentStatus[2]))};}
   const preparation=url.pathname.match(/^\/api\/unified\/workspaces\/([^/]+)\/jobs\/([^/]+)\/resolve-preparation$/);
@@ -18,7 +20,7 @@ export function unifiedRoute(publisher, method, url, input={},executor=null) {
   if(method==='GET' && kind==='jobs' && !id) {
     const limit=url.searchParams.has('limit')?Number(url.searchParams.get('limit')):100;
     const offset=url.searchParams.has('offset')?Number(url.searchParams.get('offset')):0;
-    return {status:200,body:{jobs:publisher.list(workspace,url.searchParams.get('accountId')||null,{limit,offset})}};
+    return {status:200,body:{jobs:publisher.list(workspace,url.searchParams.get('accountId')||null,{limit,offset}).map(job=>{const execution=executor?.executionCapability(workspace,job.id)||{canExecute:false,mode:'DISABLED'};return {...job,canExecute:execution.canExecute,execution};})}};
   }
   if(method==='POST' && kind==='content' && !id)return {status:201,body:publisher.importContent(workspace,input)};
   if(method==='POST' && kind==='jobs' && !id)return {status:201,body:publisher.createPageJob(workspace,input)};

@@ -3,6 +3,7 @@ import {realpathSync,statSync,existsSync,mkdirSync,copyFileSync,chmodSync} from 
 import {dirname,join,relative,extname} from 'node:path';
 import {hashFile} from './publisher-core/file-hash.ts';
 import {platformOf,guardedStates,terminalStates} from './publisher-platforms.js';
+import {SingleExecutionPermits} from './single-execution-permit.js';
 
 const safeError=error=>String(error?.message||error).replace(/EAA[A-Za-z0-9_-]+|Bearer\s+\S+/g,'[REDACTED]').slice(0,800);
 const pending=new Set(['PREPARING','SUBMITTING','UNKNOWN']);
@@ -16,6 +17,7 @@ export class UnifiedExecutor {
       CREATE TABLE IF NOT EXISTS publisher_submit_receipts(job_id TEXT PRIMARY KEY REFERENCES publisher_jobs(id),platform_id TEXT NOT NULL,platform_url TEXT NOT NULL,evidence_json TEXT NOT NULL,created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS publisher_job_assets(job_id TEXT NOT NULL REFERENCES publisher_jobs(id),ordinal INTEGER NOT NULL,path TEXT NOT NULL,sha256 TEXT NOT NULL,size INTEGER NOT NULL,PRIMARY KEY(job_id,ordinal));`);
     this.db.exec('CREATE TABLE IF NOT EXISTS publisher_prepare_intents(job_id TEXT PRIMARY KEY REFERENCES publisher_jobs(id),created_at TEXT NOT NULL)');
+    this.permits=new SingleExecutionPermits(publisher);
   }
   freezeMedia(job) {
     const old=this.db.prepare('SELECT * FROM publisher_job_assets WHERE job_id=? ORDER BY ordinal').all(job.id);
@@ -78,19 +80,37 @@ export class UnifiedExecutor {
       driver=await this.drivers.create(snapshot);if(!driver.inspect)throw Error('只读预检未接入');return await driver.inspect();
     }finally{try{await driver?.close();}finally{release?.();}}
   }
+  executionCapability(workspace,id) {
+    const job=this.publisher.job(workspace,id);
+    if(this.permits.record(id)){
+      const result=this.permits.capability(job);if(!result.canExecute)return result;
+      try{this.assertClaimable(job);return result;}catch(error){return {...result,canExecute:false,reason:error.message};}
+    }
+    if(!this.enabled)return {canExecute:false,mode:'DISABLED',reason:'验收模式未开启真实提交'};
+    try{this.assertClaimable(job);return {canExecute:true,mode:'GLOBAL'};}
+    catch(error){return {canExecute:false,mode:'GLOBAL',reason:error.message};}
+  }
+  assertClaimable(job) {
+    if(job.state!=='READY')throw Error('只有确认后的任务可执行；未知结果必须核对');
+    this.publisher.assertCurrent(job);
+    const duplicate=this.db.prepare('SELECT snapshot_json,state FROM publisher_jobs WHERE workspace=? AND id<>?').all(job.workspace,job.id).find(row=>{const s=JSON.parse(row.snapshot_json);return guardedStates.includes(row.state)&&platformOf(s)===platformOf(job.snapshot)&&(platformOf(s)==='facebook'?(s.targetPageId||s.externalId):s.externalId)===(job.snapshot.targetPageId||job.snapshot.externalId)&&(s.payloadHash||s.contentHash)===(job.snapshot.payloadHash||job.snapshot.contentHash);});
+    if(duplicate)throw Error('同一身份与内容已有提交或待核对任务，不能切换模式重发');
+  }
   claim(workspace,id) {
     return this.publisher.store.tx(()=>{
-      const job=this.publisher.job(workspace,id);if(job.state!=='READY')throw Error('只有确认后的任务可执行；未知结果必须核对');
-      this.publisher.assertCurrent(job);
-      const duplicate=this.db.prepare('SELECT snapshot_json,state FROM publisher_jobs WHERE workspace=? AND id<>?').all(workspace,id).find(row=>{const s=JSON.parse(row.snapshot_json);return guardedStates.includes(row.state)&&platformOf(s)===platformOf(job.snapshot)&&(platformOf(s)==='facebook'?(s.targetPageId||s.externalId):s.externalId)===(job.snapshot.targetPageId||job.snapshot.externalId)&&(s.payloadHash||s.contentHash)===(job.snapshot.payloadHash||job.snapshot.contentHash);});
-      if(duplicate)throw Error('同一身份与内容已有提交或待核对任务，不能切换模式重发');
-      this.db.prepare("UPDATE publisher_jobs SET state='PREPARING',attempt_id=?,updated_at=? WHERE id=? AND state='READY'").run(randomUUID(),new Date().toISOString(),id);
+      const job=this.publisher.job(workspace,id);this.assertClaimable(job);
+      const attemptId=randomUUID();
+      // A scoped record always wins over the global switch, including spent/revoked records.
+      if(this.permits.record(id))this.permits.consume(job,attemptId);
+      else if(!this.enabled)throw Error('验收模式未开启真实提交；此任务没有单次许可');
+      const changed=this.db.prepare("UPDATE publisher_jobs SET state='PREPARING',attempt_id=?,updated_at=? WHERE id=? AND state='READY'").run(attemptId,new Date().toISOString(),id);
+      if(changed.changes!==1)throw Error('任务已被其他执行者领取');
       return this.publisher.job(workspace,id);
     });
   }
   async execute(workspace,id) {
-    if(!this.enabled)throw Error('验收模式未开启真实提交');
     const initial=this.publisher.job(workspace,id),profile=initial.snapshot.profileId;
+    if(!this.enabled&&!this.permits.record(id))throw Error('验收模式未开启真实提交');
     if(this.active.has(profile))throw Error('该浏览器账号正在执行任务');
     this.active.add(profile);let job,driver,release;
     try {

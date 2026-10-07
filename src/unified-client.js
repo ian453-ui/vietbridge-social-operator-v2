@@ -2,6 +2,12 @@ const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;
 
 const platforms={facebook:'Facebook',xiaohongshu:'小红书',wechat_official_account:'微信公众号草稿',wechat_channels:'视频号'};
 const states={DRAFT_WRITTEN:'草稿已写入 · 未发表',PUBLISHED_ID_PENDING:'已确认发表 · 公开 ID 待取得'};
+export function executionButton(job) {
+  if(job.state!=='READY')return '';
+  const allowed=job.canExecute===true;
+  const label=allowed?(job.execution?.mode==='SINGLE_USE'?'执行此任务一次':'执行已确认发布'):'当前任务不可执行';
+  return `<button data-execute="${esc(job.id)}" ${allowed?'':'disabled'}>${label}</button>${job.execution?.expiresAt?`<small>单次许可有效至 ${esc(job.execution.expiresAt)}</small>`:''}${!allowed&&job.execution?.reason?`<p>${esc(job.execution.reason)}</p>`:''}`;
+}
 export function unifiedPublisherView(workspace,account,contents=[],profiles=[],accounts=[]) {
   if(!workspace)return '<section class="panel empty">请选择客户与运营账号。</section>';
   const manager=`<section class="panel" id="unified-account-manager" data-workspace="${esc(workspace)}"><details><summary>配置当前客户的平台账号（使用现有授权）</summary>
@@ -57,8 +63,8 @@ export async function mountUnifiedPublisher({workspace,account,token,executionEn
     const response=await fetch(prefix+path,input===undefined?{}:{method:'POST',headers:{'content-type':'application/json','x-local-token':token},body:JSON.stringify(input)});
     const data=await response.json();if(!response.ok)throw Error(data.error||'请求失败');return data;
   }
-  async function run(button,fn) {
-    button.disabled=true;try{await fn();}catch(error){if(root.isConnected)status.textContent=error.message;}finally{if(button.isConnected)button.disabled=false;}
+  async function run(button,fn,{enableAfter=true}={}) {
+    button.disabled=true;try{await fn();}catch(error){if(root.isConnected)status.textContent=error.message;}finally{if(button.isConnected&&enableAfter)button.disabled=false;}
   }
   let revision=0;
   root.querySelector('#unified-inspect-account').onclick=event=>run(event.currentTarget,async()=>{const result=await request(`/accounts/${encodeURIComponent(account.id)}/inspect`,{});if(root.isConnected)status.textContent=result.healthy?'已核实当前平台身份：'+result.externalId+(result.identityEvidence?' · '+result.identityEvidence:''):result.reason||'需检查登录或连接';});
@@ -70,7 +76,7 @@ export async function mountUnifiedPublisher({workspace,account,token,executionEn
       <p>${esc(platforms[job.snapshot.platform||'facebook'])} · ${esc(job.snapshot.expectedIdentity)} · ${esc(job.snapshot.externalId)} · ${esc(job.snapshot.transport)}</p>
       <details><summary>核对冻结正文与媒体</summary><pre>${esc(job.snapshot.body)}</pre><pre>${esc(job.snapshot.media.join('\n'))}</pre></details>
       ${job.state==='DRAFT'?`<button data-approve="${esc(job.id)}">确认此版本</button>`:''}
-      ${job.state==='READY'?`<button data-execute="${esc(job.id)}" ${executionEnabled?'':'disabled'}>${executionEnabled?'执行已确认发布':'验收模式：不提交'}</button>`:''}
+      ${executionButton(job)}
       ${job.state==='UNKNOWN'?`<label>平台作品 ID（缺回执时填写）<input data-platform-id="${esc(job.id)}"></label><button data-reconcile="${esc(job.id)}">只读核对平台结果</button>`:''}
       ${job.state==='UNKNOWN'&&job.evidence.stage==='PREPARING'&&!job.evidence.submissionIntent?`<button data-resolve-preparation="${esc(job.id)}">人工核对准备中断（没有最终提交）</button>`:''}
       ${job.state==='BLOCKED'?`<button data-reopen="${esc(job.id)}">修复条件后重新审核</button>`:''}
@@ -92,7 +98,7 @@ export async function mountUnifiedPublisher({workspace,account,token,executionEn
       if(action==='execute'&&!window.confirm(`确认用此任务冻结的账号、模式与内容${job.snapshot.platform==='wechat_official_account'?'写入公众号草稿（不公开发表）':'发布到 '+(platforms[job.snapshot.platform||'facebook'])}？`))return;
       const input=action==='reconcile'?{platform_id:root.querySelector(`[data-platform-id="${id}"]`)?.value||undefined}:{};
       try {await request(`/jobs/${encodeURIComponent(id)}/${action}`,input);}finally{await loadJobs();}
-    }));
+    },{enableAfter:action!=='execute'}));
   }
   root.querySelector('#unified-all-accounts').onchange=()=>loadJobs().catch(e=>{if(root.isConnected)status.textContent=e.message;});
   if(root.querySelector('#unified-switch-transport'))root.querySelector('#unified-switch-transport').onclick=event=>run(event.currentTarget,async()=>{
