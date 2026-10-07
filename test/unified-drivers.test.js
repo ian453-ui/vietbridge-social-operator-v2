@@ -13,7 +13,7 @@ test('API adapter validates target, dry-runs, submits once and independently ver
   client.call=async()=>({status:'ready',page_id:'wrong'});await assert.rejects(()=>driver.prepare(s,[]),/身份/);
 });
 test('browser adapter verifies actor before fill and submit, and never calls an API fallback',async()=>{
-  const calls=[],facebook={async inspect(){calls.push('identity');return {healthy:true,externalId:'61594159443807'};}},browser={browser:{},async connect(){calls.push('connect');},async publishedMatch(){return null;},async fill(body){assert.equal(body,snapshot.body);calls.push('fill');},async submit(){calls.push('submit');},async readback(){calls.push('readback');return {id:'999',url:'https://www.facebook.com/12345/posts/999'};},async close(){}};
+  const calls=[],facebook={async inspect(){calls.push('identity');return {healthy:true,externalId:'61594159443807'};}},browser={browser:{},async connect(){calls.push('connect');},async publishedMatch(){return null;},async fill(body){assert.equal(body,snapshot.body);calls.push('fill');},async readiness(){calls.push('readiness');return {actionabilityTrialPassed:true};},async submit(){calls.push('submit');},async readback(){calls.push('readback');return {id:'999',url:'https://www.facebook.com/12345/posts/999'};},async close(){}};
   const driver=new BrowserDriver(snapshot,facebook,{browser});await driver.prepare(snapshot,[]);await driver.submit();assert.equal((await driver.readback(snapshot)).verified,true);
   assert.ok(calls.indexOf('identity')<calls.indexOf('fill'));assert.equal(calls.filter(x=>x==='submit').length,1);
   facebook.inspect=async()=>({healthy:true,externalId:'wrong'});await assert.rejects(()=>driver.submit(),/身份/);

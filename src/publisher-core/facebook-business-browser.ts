@@ -1,4 +1,5 @@
 import {chromium, type Browser, type Page} from 'playwright-core';
+import {createHash} from 'node:crypto';
 import {parseConfig, type FacebookAccount} from './facebook-accounts.ts';
 
 const clean=(value:string)=>value.replace(/\s+/g,' ').trim();
@@ -15,6 +16,9 @@ export function browserPageConfig(account:FacebookAccount):{port:number;browserP
 export class FacebookBusinessBrowser {
   private browser?:Browser;
   private composer?:Page;
+  private prepared?:{caption:string;images:number;video:boolean};
+  private verified=false;
+  private lastEvidence:Record<string,unknown>={};
   private readonly account:FacebookAccount;
   private readonly port:number;
   private readonly browserPageId:string;
@@ -45,6 +49,7 @@ export class FacebookBusinessBrowser {
   }
   async fill(caption:string,images:string[],{video=false,title=''}:{video?:boolean;title?:string}={}):Promise<void>{
     if(video&&(images.length!==1||!images[0].toLowerCase().endsWith('.mp4')))throw Error('Facebook 视频必须为单个已批准 MP4');
+    this.prepared={caption,images:images.length,video};this.verified=false;
     this.composer=await this.page(this.composerUrl());const page=this.composer;
     const editor=page.getByLabel('Write into the dialogue box to include text with your post.');
     await editor.waitFor({timeout:20000});
@@ -66,9 +71,39 @@ export class FacebookBusinessBrowser {
     }else if(await page.getByRole('button',{name:'Remove photo'}).count()!==images.length)throw Error('Facebook 浏览器图片数量与已批准内容不一致');
     if(!await page.getByRole('radio',{name:/^Public Anyone/}).isChecked())throw Error('Facebook 浏览器公开范围未核实');
     for(const name of ['Share to Facebook Story','Make this an ad post','Set date and time','Boost'])if(await page.getByRole('switch',{name}).isChecked())throw Error(`Facebook 浏览器意外开启了 ${name}`);
-    if(!await publish.isEnabled())throw Error(`Facebook 浏览器发布按钮未就绪：${clean(await page.locator('body').innerText()).slice(-300)}`);
+    await this.readiness();
   }
-  async submit():Promise<void>{if(!this.composer)throw Error('Facebook 发布表单未准备');await this.composer.getByRole('button',{name:'Publish',exact:true}).click({timeout:15000})}
-  async readback(caption:string,options:{video?:boolean}={}):Promise<{id:string;url:string}>{for(let i=0;i<8;i++){const match=await this.publishedMatch(caption,options).catch(()=>null);if(match)return match;await new Promise(resolve=>setTimeout(resolve,2500))}throw Error('Facebook 已点击发布，但未从已发表列表读回匹配内容')}
-  async close():Promise<void>{await this.composer?.close().catch(()=>{});await this.browser?.close().catch(()=>{})}
+  /** No force or synthetic click. Trial checks visibility/enabled/stability/occlusion without dispatch. */
+  async readiness():Promise<Record<string,unknown>>{
+    if(!this.composer||!this.prepared)throw Error('Facebook 发布表单未准备');
+    const page=this.composer,expected=this.prepared,publish=page.getByRole('button',{name:'Publish',exact:true});
+    const evidence:Record<string,unknown>={checkedAt:new Date().toISOString(),targetPageId:this.account.page_id,operatorActorId:this.browserPageId,phase:'READINESS',finalClickAttempted:false};
+    this.lastEvidence=evidence;
+    try{
+      const url=new URL(page.url());evidence.composerTargetMatches=url.hostname==='business.facebook.com'&&url.pathname.startsWith('/latest/composer')&&url.searchParams.get('asset_id')===this.account.page_id;
+      evidence.destinationCount=await page.getByRole('combobox',{name:`Post to ${this.account.page_name}`}).count();
+      const editor=page.getByLabel('Write into the dialogue box to include text with your post.');
+      const body=clean(await editor.innerText());evidence.bodyMatches=body===clean(expected.caption);evidence.bodySha256=createHash('sha256').update(body).digest('hex');
+      evidence.publicChecked=await page.getByRole('radio',{name:/^Public Anyone/}).isChecked();
+      const switches:Record<string,boolean>={};for(const name of ['Share to Facebook Story','Make this an ad post','Set date and time','Boost'])switches[name]=await page.getByRole('switch',{name}).isChecked();evidence.switches=switches;
+      evidence.mediaCount=expected.video?await page.getByRole('button',{name:/^(Remove video|删除视频|移除视频)$/u}).count():await page.getByRole('button',{name:'Remove photo'}).count();
+      evidence.mediaReady=expected.video?(evidence.mediaCount===1||await page.locator('video').count()===1)&&await page.getByRole('progressbar').count()===0&&!/Uploading|Processing video|上传中|视频处理中/u.test(await page.locator('body').innerText()):evidence.mediaCount===expected.images;
+      evidence.buttonCount=await publish.count();
+      if(evidence.buttonCount!==1)throw Error('Facebook Publish 按钮不唯一，未点击');
+      evidence.buttonVisible=await publish.isVisible();evidence.buttonEnabled=await publish.isEnabled();
+      if(!evidence.composerTargetMatches||evidence.destinationCount!==1||!evidence.bodyMatches||!evidence.publicChecked||Object.values(switches).some(Boolean)||!evidence.mediaReady)throw Error('Facebook 冻结表单、目标或公开范围核对失败，未点击');
+      if(!evidence.buttonVisible||!evidence.buttonEnabled)throw Error('Facebook Publish 按钮不可见或不可用，未点击');
+      await publish.click({trial:true,timeout:5000});evidence.actionabilityTrialPassed=true;
+      return {...evidence};
+    }catch(error){evidence.actionabilityTrialPassed=false;throw error;}
+  }
+  failureEvidence():Record<string,unknown>{return {...this.lastEvidence,composerRetained:Boolean(this.composer&&!this.verified)};}
+  async submit():Promise<void>{
+    await this.readiness();
+    this.lastEvidence={...this.lastEvidence,phase:'FINAL_CLICK',finalClickAttempted:true};
+    await this.composer!.getByRole('button',{name:'Publish',exact:true}).click({timeout:15000});
+    this.lastEvidence={...this.lastEvidence,clickCallCompleted:true};
+  }
+  async readback(caption:string,options:{video?:boolean}={}):Promise<{id:string;url:string}>{for(let i=0;i<8;i++){const match=await this.publishedMatch(caption,options).catch(()=>null);if(match){this.verified=true;return match;}await new Promise(resolve=>setTimeout(resolve,2500))}throw Error('Facebook 提交结果未从已发表列表确认，保留 UNKNOWN，禁止重发')}
+  async close():Promise<void>{if(this.verified)await this.composer?.close().catch(()=>{});await this.browser?.close().catch(()=>{})}
 }

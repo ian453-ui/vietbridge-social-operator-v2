@@ -71,11 +71,13 @@ export class BrowserDriver {
     await this.identity();await this.browser.connect();
     if(await this.browser.publishedMatch(snapshot.body))throw Error('平台已存在相同内容，未重复提交');
     onWrite();await this.browser.fill(snapshot.body,assets,{video:assets.some(x=>x.endsWith('.mp4')),title:snapshot.title});await this.identity();
-    return {operation:assets.some(x=>x.endsWith('.mp4'))?'FACEBOOK_BROWSER_VIDEO':'FACEBOOK_BROWSER_PAGE_POST',pageId:snapshot.targetPageId,targetPageId:snapshot.targetPageId,operatorActorId:snapshot.operatorActorId,mediaCount:assets.length};
+    const form=await this.browser.readiness();
+    return {operation:assets.some(x=>x.endsWith('.mp4'))?'FACEBOOK_BROWSER_VIDEO':'FACEBOOK_BROWSER_PAGE_POST',pageId:snapshot.targetPageId,targetPageId:snapshot.targetPageId,operatorActorId:snapshot.operatorActorId,mediaCount:assets.length,form};
   }
   async submit(){await this.identity();await this.browser.submit();return null;}
   async readback(snapshot){await this.identity();if(!this.browser.browser)await this.browser.connect();const post=await this.browser.readback(snapshot.body,{video:snapshot.media.some(x=>x.toLowerCase().endsWith('.mp4'))});return {verified:true,id:post.id,url:post.url,pageId:snapshot.targetPageId,targetPageId:snapshot.targetPageId,operatorActorId:snapshot.operatorActorId,identityEvidence:'BROWSER_ACTOR_AND_BUSINESS_ASSET',contentHash:snapshot.contentHash,method:'BROWSER_PUBLISHED_LIST_READBACK'};}
   async close(){await this.browser.close();}
+  failureEvidence(){return this.browser.failureEvidence?.();}
 }
 
 export function unifiedDrivers(facebook) {
