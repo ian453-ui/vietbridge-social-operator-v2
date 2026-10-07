@@ -1,7 +1,8 @@
+import {executionScope} from './single-execution-permit.js';
 /** Authenticated parent server calls this only after Host/auth/Origin/CSRF validation. */
 export function unifiedRoute(publisher, method, url, input={},executor=null) {
   const capability=url.pathname.match(/^\/api\/unified\/workspaces\/([^/]+)\/jobs\/([^/]+)\/execution-capability$/);
-  if(capability){if(method!=='GET')return {status:405,body:{error:'METHOD_NOT_ALLOWED'}};if(!executor)throw Error('执行器未接入');return {status:200,body:executor.executionCapability(decodeURIComponent(capability[1]),decodeURIComponent(capability[2]))};}
+  if(capability){if(method!=='GET')return {status:405,body:{error:'METHOD_NOT_ALLOWED'}};if(!executor)throw Error('执行器未接入');const workspace=decodeURIComponent(capability[1]),id=decodeURIComponent(capability[2]),job=publisher.job(workspace,id);return {status:200,body:{...executor.executionCapability(workspace,id),scope:executionScope(job),state:job.state,attemptId:job.attempt_id}};}
   const contentStatus=url.pathname.match(/^\/api\/unified\/workspaces\/([^/]+)\/accounts\/([^/]+)\/content-status$/);
   if(contentStatus){if(method!=='GET')return {status:405,body:{error:'METHOD_NOT_ALLOWED'}};return {status:200,body:publisher.contentStatus(decodeURIComponent(contentStatus[1]),decodeURIComponent(contentStatus[2]))};}
   const preparation=url.pathname.match(/^\/api\/unified\/workspaces\/([^/]+)\/jobs\/([^/]+)\/resolve-preparation$/);

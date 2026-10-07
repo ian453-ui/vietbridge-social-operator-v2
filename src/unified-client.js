@@ -2,6 +2,42 @@ const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;
 
 const platforms={facebook:'Facebook',xiaohongshu:'小红书',wechat_official_account:'微信公众号草稿',wechat_channels:'视频号'};
 const states={DRAFT_WRITTEN:'草稿已写入 · 未发表',PUBLISHED_ID_PENDING:'已确认发表 · 公开 ID 待取得'};
+export function confirmationScope(job) {
+  const s=job.snapshot;
+  return {job_id:job.id,content_id:job.content_id,workspace:job.workspace,account_id:job.account_id,operator_actor_id:s.operatorActorId,target_page_id:s.targetPageId,platform:s.platform,transport:s.transport,snapshot_hash:job.snapshot_hash,media_count:s.media.length};
+}
+export function validateExecutionConfirmation(job,capability,now=Date.now()) {
+  const expected=confirmationScope(job),actual=capability.scope;
+  if(capability.canExecute!==true||capability.state!=='READY'||capability.attemptId)throw Error(capability.reason||'任务已不可执行，请只读核对状态');
+  if(!actual||Object.keys(actual).length!==Object.keys(expected).length||Object.keys(expected).some(key=>actual[key]!==expected[key]))throw Error('任务范围或冻结版本已改变，请重新核对');
+  if(capability.mode!==job.execution?.mode)throw Error('执行许可方式已改变');
+  if(capability.mode==='SINGLE_USE'&&(capability.permitStatus!=='AVAILABLE'||capability.permitId!==job.execution.permitId||capability.expiresAt!==job.execution.expiresAt||!Number.isFinite(Date.parse(capability.expiresAt))||Date.parse(capability.expiresAt)<=now))throw Error('单次许可已改变、过期或消费，不能执行');
+}
+/** Model shared by the visible dialog and deterministic tests. No submit on open/cancel. */
+export class ExecutionConfirmation {
+  constructor({job,isCurrent,readCapability,submit,readback,onAttempt=()=>{},now=()=>Date.now()}){Object.assign(this,{job,isCurrent,readCapability,submit,readback,onAttempt,now});this.open=false;this.busy=false;this.sent=false;}
+  show(){if(this.sent||this.busy||!this.isCurrent())return false;this.open=true;return true;}
+  cancel(){this.open=false;}
+  async confirm(){
+    if(!this.open||this.busy||this.sent)return false;
+    this.busy=true;
+    try {
+      const capability=await this.readCapability();
+      if(!this.open||!this.isCurrent())throw Error('页面、账号或任务已切换，本次确认已失效');
+      validateExecutionConfirmation(this.job,capability,this.now());
+      this.onAttempt();this.sent=true;this.open=false;
+      try {await this.submit();}finally{await this.readback();}
+      return true;
+    }finally{this.busy=false;}
+  }
+}
+export function executionConfirmationView(job) {
+  const s=job.snapshot;
+  return `<h2 id="execution-confirmation-title">确认执行此任务${job.execution?.mode==='SINGLE_USE'?'一次':''}</h2><p>只有点击“确认并执行一次”才会提交。取消或按 Esc 不会发布。</p>
+    <dl><dt>客户</dt><dd>${esc(job.workspace)}</dd><dt>账号</dt><dd>${esc(s.expectedIdentity)} · ${esc(job.account_id)}</dd><dt>Actor</dt><dd>${esc(s.operatorActorId||s.externalId)}</dd><dt>目标 Page／平台身份</dt><dd>${esc(s.targetPageId||s.externalId)}</dd><dt>平台／方式</dt><dd>${esc(s.platform)} · ${esc(s.transport)}</dd><dt>任务</dt><dd>${esc(job.id)}</dd><dt>内容／冻结 hash</dt><dd>${esc(job.content_id)}<br>${esc(job.snapshot_hash)}</dd><dt>许可有效至</dt><dd>${esc(job.execution?.expiresAt||'按当前任务执行权限核对')}</dd></dl>
+    <h3>冻结正文</h3><pre>${esc(s.body)}</pre><p>媒体：${s.media.length} 项</p><pre>${esc(s.media.join('\n'))}</pre>
+    <p data-confirm-status role="status" aria-live="polite"></p><button type="button" data-confirm-cancel>取消</button><button type="button" data-confirm-submit>确认并执行一次</button>`;
+}
 export function executionButton(job) {
   if(job.state!=='READY')return '';
   const allowed=job.canExecute===true;
@@ -67,8 +103,26 @@ export async function mountUnifiedPublisher({workspace,account,token,executionEn
     button.disabled=true;try{await fn();}catch(error){if(root.isConnected)status.textContent=error.message;}finally{if(button.isConnected&&enableAfter)button.disabled=false;}
   }
   let revision=0;
+  let activeConfirmation;
+  const attempted=new Set(),attemptKey=job=>`publisher-execution-attempt:${job.id}:${job.snapshot_hash}`;
+  const wasAttempted=job=>{try{return attempted.has(job.id)||sessionStorage.getItem(attemptKey(job))==='sent';}catch{return attempted.has(job.id);}};
+  function closeConfirmation(){activeConfirmation?.();activeConfirmation=null;}
+  function showConfirmation(button,job){
+    if(activeConfirmation||wasAttempted(job)||!root.isConnected)return;
+    const dialog=document.createElement('dialog');dialog.className='execution-confirmation';dialog.setAttribute('aria-labelledby','execution-confirmation-title');dialog.setAttribute('aria-modal','true');dialog.innerHTML=executionConfirmationView(job);root.append(dialog);
+    const generation=revision,confirm=dialog.querySelector('[data-confirm-submit]'),cancel=dialog.querySelector('[data-confirm-cancel]'),message=dialog.querySelector('[data-confirm-status]');
+    const current=()=>root.isConnected&&dialog.isConnected&&root.dataset.workspace===workspace&&root.dataset.account===account.id&&generation===revision;
+    const model=new ExecutionConfirmation({job,isCurrent:current,readCapability:()=>request(`/jobs/${encodeURIComponent(job.id)}/execution-capability`),submit:()=>request(`/jobs/${encodeURIComponent(job.id)}/execute`,{}),readback:()=>loadJobs(),onAttempt:()=>{attempted.add(job.id);try{sessionStorage.setItem(attemptKey(job),'sent');}catch{};}});
+    const observer=new MutationObserver(()=>{if(!current())cleanup();});
+    function cleanup(){model.cancel();observer.disconnect();dialog.close();dialog.remove();if(button.isConnected&&!model.sent)button.disabled=false;if(activeConfirmation===cleanup)activeConfirmation=null;}
+    activeConfirmation=cleanup;button.disabled=true;
+    cancel.onclick=cleanup;dialog.addEventListener('cancel',event=>{event.preventDefault();cleanup();});
+    confirm.onclick=async()=>{if(model.busy||model.sent)return;confirm.disabled=true;message.textContent='正在只读复核任务与许可…';try{await model.confirm();if(model.sent)cleanup();}catch(error){if(root.isConnected)status.textContent=(model.sent?'提交结果需核对，不会自动重试。':'未提交：')+error.message;if(dialog.isConnected){message.textContent=error.message;confirm.disabled=true;}if(model.sent)cleanup();}};
+    model.show();dialog.showModal();cancel.focus();observer.observe(document.getElementById('app')||document.body,{childList:true,subtree:true,attributes:true,attributeFilter:['data-workspace','data-account']});
+  }
   root.querySelector('#unified-inspect-account').onclick=event=>run(event.currentTarget,async()=>{const result=await request(`/accounts/${encodeURIComponent(account.id)}/inspect`,{});if(root.isConnected)status.textContent=result.healthy?'已核实当前平台身份：'+result.externalId+(result.identityEvidence?' · '+result.identityEvidence:''):result.reason||'需检查登录或连接';});
   async function loadJobs() {
+    closeConfirmation();
     const requestRevision=++revision,all=root.querySelector('#unified-all-accounts').checked;
     const result=await request('/jobs'+(all?'':'?accountId='+encodeURIComponent(account.id)));
     if(!root.isConnected||requestRevision!==revision)return;
@@ -76,7 +130,7 @@ export async function mountUnifiedPublisher({workspace,account,token,executionEn
       <p>${esc(platforms[job.snapshot.platform||'facebook'])} · ${esc(job.snapshot.expectedIdentity)} · ${esc(job.snapshot.externalId)} · ${esc(job.snapshot.transport)}</p>
       <details><summary>核对冻结正文与媒体</summary><pre>${esc(job.snapshot.body)}</pre><pre>${esc(job.snapshot.media.join('\n'))}</pre></details>
       ${job.state==='DRAFT'?`<button data-approve="${esc(job.id)}">确认此版本</button>`:''}
-      ${executionButton(job)}
+      ${executionButton(wasAttempted(job)?{...job,canExecute:false,execution:{...job.execution,reason:'本页面已发送一次执行请求；只读核对结果，不自动重试'}}:job)}
       ${job.state==='UNKNOWN'?`<label>平台作品 ID（缺回执时填写）<input data-platform-id="${esc(job.id)}"></label><button data-reconcile="${esc(job.id)}">只读核对平台结果</button>`:''}
       ${job.state==='UNKNOWN'&&job.evidence.stage==='PREPARING'&&!job.evidence.submissionIntent?`<button data-resolve-preparation="${esc(job.id)}">人工核对准备中断（没有最终提交）</button>`:''}
       ${job.state==='BLOCKED'?`<button data-reopen="${esc(job.id)}">修复条件后重新审核</button>`:''}
@@ -92,10 +146,10 @@ export async function mountUnifiedPublisher({workspace,account,token,executionEn
       await request(`/jobs/${encodeURIComponent(button.dataset.cancel)}/cancel`,{});await loadJobs();
     }));
     jobs.querySelectorAll('[data-resolve-preparation]').forEach(button=>button.onclick=()=>run(button,async()=>{if(!window.confirm('准备上传可能已产生临时对象。确认已检查现场，并仅恢复到阻断待审核状态？不会删除平台数据或自动重试。'))return;await request(`/jobs/${encodeURIComponent(button.dataset.resolvePreparation)}/resolve-preparation`,{acknowledge_preparation_effects:true});await loadJobs();}));
-    for(const action of ['execute','reconcile','reopen'])jobs.querySelectorAll(`[data-${action}]`).forEach(button=>button.onclick=()=>run(button,async()=>{
+    jobs.querySelectorAll('[data-execute]').forEach(button=>button.onclick=()=>showConfirmation(button,result.jobs.find(j=>j.id===button.dataset.execute)));
+    for(const action of ['reconcile','reopen'])jobs.querySelectorAll(`[data-${action}]`).forEach(button=>button.onclick=()=>run(button,async()=>{
       const id=button.dataset[action];
       const job=result.jobs.find(j=>j.id===id);
-      if(action==='execute'&&!window.confirm(`确认用此任务冻结的账号、模式与内容${job.snapshot.platform==='wechat_official_account'?'写入公众号草稿（不公开发表）':'发布到 '+(platforms[job.snapshot.platform||'facebook'])}？`))return;
       const input=action==='reconcile'?{platform_id:root.querySelector(`[data-platform-id="${id}"]`)?.value||undefined}:{};
       try {await request(`/jobs/${encodeURIComponent(id)}/${action}`,input);}finally{await loadJobs();}
     },{enableAfter:action!=='execute'}));
