@@ -223,6 +223,7 @@ async function checkGptUpdates(manual=false){
 }
 setInterval(()=>{if(route==='groups'&&workspace&&document.visibilityState!=='hidden')checkGptUpdates()},20000);
 
+  if(autoPublish&&!window.confirm('确认并自动发布：向当前账号 '+account.display_name+' 的 '+groupIds.length+' 个已选群组发布已选内容？请先核对正文和媒体。取消不会创建或发布任务。'))return;
 
 document.addEventListener('click',async event=>{
   const button=event.target.closest('[data-reconcile-theme],[data-reconcile-proactive]');if(!button)return;

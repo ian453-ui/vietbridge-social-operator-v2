@@ -95,6 +95,7 @@ export class UnifiedExecutor {
     this.publisher.assertCurrent(job);
     const duplicate=this.db.prepare('SELECT snapshot_json,state FROM publisher_jobs WHERE workspace=? AND id<>?').all(job.workspace,job.id).find(row=>{const s=JSON.parse(row.snapshot_json);return guardedStates.includes(row.state)&&platformOf(s)===platformOf(job.snapshot)&&(platformOf(s)==='facebook'?(s.targetPageId||s.externalId):s.externalId)===(job.snapshot.targetPageId||job.snapshot.externalId)&&(s.payloadHash||s.contentHash)===(job.snapshot.payloadHash||job.snapshot.contentHash);});
     if(duplicate)throw Error('同一身份与内容已有提交或待核对任务，不能切换模式重发');
+    if(this.profilePending(job.snapshot.profileId))throw Error('该浏览器账号存在提交中或 UNKNOWN 待核对任务；请先只读核对旧任务，不会自动重发或清锁');
   }
   claim(workspace,id) {
     return this.publisher.store.tx(()=>{

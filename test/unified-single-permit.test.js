@@ -113,3 +113,13 @@ test('live duplicate blocks capability and claim, retaining the original history
   assert.equal(f.executor.executionCapability(f.workspace.id,f.job.id).canExecute,false);await assert.rejects(()=>f.executor.execute(f.workspace.id,f.job.id),/不能切换模式重发/);
   assert.equal(f.creates,0);assert.equal(f.store.db.prepare("SELECT state FROM publisher_jobs WHERE id='historical-unknown'").get().state,'UNKNOWN');
 });
+test('different content with unresolved same-profile submission blocks before claim or driver',async t=>{
+ const f=setup(t);f.grant();
+ f.store.db.prepare("INSERT INTO publisher_jobs SELECT 'profile-unknown',workspace,account_id,content_id,json_set(snapshot_json,'$.payloadHash','other-payload'),snapshot_hash||'-other','UNKNOWN',NULL,'{}',created_at,updated_at FROM publisher_jobs WHERE id=?").run(f.job.id);
+ const capability=f.executor.executionCapability(f.workspace.id,f.job.id);
+ assert.equal(capability.canExecute,false);assert.match(capability.reason,/UNKNOWN 待核对/);
+ await assert.rejects(()=>f.executor.execute(f.workspace.id,f.job.id),/UNKNOWN 待核对/);
+ assert.equal(f.creates,0);assert.equal(f.submits,0);
+ assert.equal(f.publisher.job(f.workspace.id,f.job.id).state,'READY');
+ assert.equal(f.executor.permits.record(f.job.id).status,'AVAILABLE');
+});

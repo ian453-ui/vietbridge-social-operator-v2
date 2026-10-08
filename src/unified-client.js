@@ -33,18 +33,18 @@ export class ExecutionConfirmation {
     }finally{this.busy=false;}
   }
 }
-export function executionConfirmationView(job) {
-  const s=job.snapshot;
-  return `<h2 id="execution-confirmation-title">确认执行此任务${job.execution?.mode==='SINGLE_USE'?'一次':''}</h2><p>只有点击“确认并执行一次”才会提交。取消或按 Esc 不会发布。</p>
+export function executionConfirmationView(job,manual=false) {
+  const s=job.snapshot,label=manual?'确认并手动触发发布':job.execution?.mode==='SINGLE_USE'?'确认并执行一次':s.platform==='wechat_official_account'?'确认并自动写入草稿':'确认并自动发布';
+  return `<h2 id="execution-confirmation-title">确认执行此任务${job.execution?.mode==='SINGLE_USE'?'一次':''}</h2><p>只有点击“${esc(label)}”才会提交。取消或按 Esc 不会发布。</p>
     <dl><dt>客户</dt><dd>${esc(job.workspace)}</dd><dt>账号</dt><dd>${esc(s.expectedIdentity)} · ${esc(job.account_id)}</dd><dt>Actor</dt><dd>${esc(s.operatorActorId||s.externalId)}</dd><dt>目标 Page／平台身份</dt><dd>${esc(s.targetPageId||s.externalId)}</dd><dt>平台／方式</dt><dd>${esc(s.platform)} · ${esc(s.transport)}</dd><dt>任务</dt><dd>${esc(job.id)}</dd><dt>内容／冻结 hash</dt><dd>${esc(job.content_id)}<br>${esc(job.snapshot_hash)}</dd><dt>许可有效至</dt><dd>${esc(job.execution?.expiresAt||'按当前任务执行权限核对')}</dd></dl>
     <h3>冻结正文</h3><pre>${esc(s.body)}</pre><p>媒体：${s.media.length} 项</p><pre>${esc(s.media.join('\n'))}</pre>
-    <p data-confirm-status role="status" aria-live="polite"></p><button type="button" data-confirm-cancel>取消</button><button type="button" data-confirm-submit>确认并执行一次</button>`;
+    <p data-confirm-status role="status" aria-live="polite"></p><button type="button" data-confirm-cancel>取消</button><button type="button" data-confirm-submit>${esc(label)}</button>`;
 }
 export function executionButton(job) {
   if(job.state!=='READY')return '';
   const allowed=job.canExecute===true;
-  const label=allowed?(job.execution?.mode==='SINGLE_USE'?'执行此任务一次':'执行已确认发布'):'当前任务不可执行';
-  return `<button data-execute="${esc(job.id)}" ${allowed?'':'disabled'}>${label}</button>${job.execution?.expiresAt?`<small>单次许可有效至 ${esc(job.execution.expiresAt)}</small>`:''}${!allowed&&job.execution?.reason?`<p>${esc(job.execution.reason)}</p>`:''}`;
+  const label=(job.execution?.mode==='SINGLE_USE'?'执行此任务一次':job.snapshot?.platform==='wechat_official_account'?'确认并自动写入草稿':'确认并自动发布');
+  return `<button data-execute="${esc(job.id)}" ${allowed?'':'disabled'}>${label}</button><button data-execute-manual="${esc(job.id)}" ${allowed?'':'disabled'}>手动触发发布（备用）</button>${job.execution?.expiresAt?`<small>单次许可有效至 ${esc(job.execution.expiresAt)}</small>`:''}${!allowed&&job.execution?.reason?`<p>${esc(job.execution.reason)}</p>`:''}`;
 }
 export function unifiedPublisherView(workspace,account,contents=[],profiles=[],accounts=[]) {
   if(!workspace)return '<section class="panel empty">请选择客户与运营账号。</section>';
@@ -110,9 +110,9 @@ export async function mountUnifiedPublisher({workspace,account,token,executionEn
   const attempted=new Set(),attemptKey=job=>`publisher-execution-attempt:${job.id}:${job.snapshot_hash}`;
   const wasAttempted=job=>{try{return attempted.has(job.id)||sessionStorage.getItem(attemptKey(job))==='sent';}catch{return attempted.has(job.id);}};
   function closeConfirmation(){activeConfirmation?.();activeConfirmation=null;}
-  function showConfirmation(button,job){
+  function showConfirmation(button,job,manual=false){
     if(activeConfirmation||wasAttempted(job)||!root.isConnected)return;
-    const dialog=document.createElement('dialog');dialog.className='execution-confirmation';dialog.setAttribute('aria-labelledby','execution-confirmation-title');dialog.setAttribute('aria-modal','true');dialog.innerHTML=executionConfirmationView(job);root.append(dialog);
+    const dialog=document.createElement('dialog');dialog.className='execution-confirmation';dialog.setAttribute('aria-labelledby','execution-confirmation-title');dialog.setAttribute('aria-modal','true');dialog.innerHTML=executionConfirmationView(job,manual);root.append(dialog);
     const generation=revision,confirm=dialog.querySelector('[data-confirm-submit]'),cancel=dialog.querySelector('[data-confirm-cancel]'),message=dialog.querySelector('[data-confirm-status]');
     const current=()=>root.isConnected&&dialog.isConnected&&root.dataset.workspace===workspace&&root.dataset.account===account.id&&generation===revision;
     const model=new ExecutionConfirmation({job,isCurrent:current,readCapability:()=>request(`/jobs/${encodeURIComponent(job.id)}/execution-capability`),submit:()=>request(`/jobs/${encodeURIComponent(job.id)}/execute`,{}),readback:()=>loadJobs(),onAttempt:()=>{attempted.add(job.id);try{sessionStorage.setItem(attemptKey(job),'sent');}catch{};}});
@@ -132,7 +132,7 @@ export async function mountUnifiedPublisher({workspace,account,token,executionEn
     jobs.innerHTML=result.jobs.map(job=>`<article class="panel"><b>${esc(job.snapshot.title||job.content_id)} · ${esc(states[job.state]||job.state)}</b>
       <p>${esc(platforms[job.snapshot.platform||'facebook'])} · ${esc(job.snapshot.expectedIdentity)} · ${esc(job.snapshot.externalId)} · ${esc(job.snapshot.transport)}</p>
       <details><summary>核对冻结正文与媒体</summary><pre>${esc(job.snapshot.body)}</pre><pre>${esc(job.snapshot.media.join('\n'))}</pre></details>
-      ${job.state==='DRAFT'?`<button data-approve="${esc(job.id)}">确认此版本</button>`:''}
+      ${job.state==='DRAFT'?`<button class="primary" data-approve-auto="${esc(job.id)}">${job.snapshot.platform==='wechat_official_account'?'确认并自动写入草稿':'确认并自动发布'}</button><button data-approve="${esc(job.id)}">仅确认版本（稍后手动发布）</button>`:''}
       ${executionButton(wasAttempted(job)?{...job,canExecute:false,execution:{...job.execution,reason:'本页面已发送一次执行请求；只读核对结果，不自动重试'}}:job)}
       ${job.state==='UNKNOWN'?`<label>平台作品 ID（缺回执时填写）<input data-platform-id="${esc(job.id)}"></label><button data-reconcile="${esc(job.id)}">只读核对平台结果</button>${job.snapshot.platform==='facebook'&&job.snapshot.transport==='BROWSER'?`<button data-diagnose="${esc(job.id)}">只读诊断（保留现场，不改任务）</button><button data-diagnostic-refresh="${esc(job.id)}">读取诊断进度与证据</button><pre data-diagnostic-report="${esc(job.id)}" role="status" aria-live="polite"></pre>`:''}`:''}
       ${job.state==='UNKNOWN'&&job.evidence.stage==='PREPARING'&&!job.evidence.submissionIntent?`<button data-resolve-preparation="${esc(job.id)}">人工核对准备中断（没有最终提交）</button>`:''}
@@ -145,11 +145,13 @@ export async function mountUnifiedPublisher({workspace,account,token,executionEn
       const job=result.jobs.find(j=>j.id===button.dataset.approve);
       await request(`/jobs/${encodeURIComponent(job.id)}/approve`,{snapshot_hash:job.snapshot_hash});await loadJobs();
     }));
+    jobs.querySelectorAll('[data-approve-auto]').forEach(button=>button.onclick=()=>run(button,async()=>{const job=result.jobs.find(j=>j.id===button.dataset.approveAuto);await request('/jobs/'+encodeURIComponent(job.id)+'/approve',{snapshot_hash:job.snapshot_hash});const fresh=await loadJobs(),ready=fresh?.jobs.find(j=>j.id===job.id),next=jobs.querySelector('[data-execute="'+job.id+'"]');if(ready?.canExecute&&next)showConfirmation(next,ready);else if(root.isConnected)status.textContent=ready?.execution?.reason||'任务暂不可发布，请核对状态';}));
     jobs.querySelectorAll('[data-cancel]').forEach(button=>button.onclick=()=>run(button,async()=>{
       await request(`/jobs/${encodeURIComponent(button.dataset.cancel)}/cancel`,{});await loadJobs();
     }));
     jobs.querySelectorAll('[data-resolve-preparation]').forEach(button=>button.onclick=()=>run(button,async()=>{if(!window.confirm('准备上传可能已产生临时对象。确认已检查现场，并仅恢复到阻断待审核状态？不会删除平台数据或自动重试。'))return;await request(`/jobs/${encodeURIComponent(button.dataset.resolvePreparation)}/resolve-preparation`,{acknowledge_preparation_effects:true});await loadJobs();}));
     jobs.querySelectorAll('[data-execute]').forEach(button=>button.onclick=()=>showConfirmation(button,result.jobs.find(j=>j.id===button.dataset.execute)));
+    jobs.querySelectorAll('[data-execute-manual]').forEach(button=>button.onclick=()=>showConfirmation(button,result.jobs.find(j=>j.id===button.dataset.executeManual),true));
     async function diagnosticProgress(id){const value=await request(`/jobs/${encodeURIComponent(id)}/diagnostics`);if(root.isConnected){const box=jobs.querySelector(`[data-diagnostic-report="${id}"]`);if(box)box.textContent=JSON.stringify(value,null,2);}return value;}
     jobs.querySelectorAll('[data-diagnostic-refresh]').forEach(button=>button.onclick=()=>run(button,()=>diagnosticProgress(button.dataset.diagnosticRefresh)));
     jobs.querySelectorAll('[data-diagnose]').forEach(button=>button.onclick=()=>run(button,async()=>{const job=result.jobs.find(j=>j.id===button.dataset.diagnose);await request(`/jobs/${encodeURIComponent(job.id)}/diagnostics`,{snapshot_hash:job.snapshot_hash});for(let i=0;i<45&&root.isConnected&&button.isConnected;i++){const value=await diagnosticProgress(job.id);if(value.state!=='RUNNING')return;await new Promise(resolve=>setTimeout(resolve,2000));}if(root.isConnected)status.textContent='诊断仍在运行或页面已切换；只读取进度，不会再次启动。';},{enableAfter:false}));
@@ -159,6 +161,7 @@ export async function mountUnifiedPublisher({workspace,account,token,executionEn
       const input=action==='reconcile'?{platform_id:root.querySelector(`[data-platform-id="${id}"]`)?.value||undefined}:{};
       try {await request(`/jobs/${encodeURIComponent(id)}/${action}`,input);}finally{await loadJobs();}
     },{enableAfter:action!=='execute'}));
+    return result;
   }
   root.querySelector('#unified-all-accounts').onchange=()=>loadJobs().catch(e=>{if(root.isConnected)status.textContent=e.message;});
   if(root.querySelector('#unified-switch-transport'))root.querySelector('#unified-switch-transport').onclick=event=>run(event.currentTarget,async()=>{
