@@ -50,6 +50,7 @@ async function createGroupTasks(button,autoPublish=true){
   if(!account)return show('Facebook 账号不可用，请先到“账号与设置”完成配置');
   if(!groupIds.length)return show('请至少勾选一个群组，再创建任务');
   if(groupIds.some(id=>!groupNameMatches(fb.facebookGroups.find(g=>g.id===id)?.name,filters)))return show('所选群组包含被名称筛选排除的群组，请重新选择');
+  if(autoPublish&&!window.confirm('确认并自动发布：向当前账号 '+account.display_name+' 的 '+groupIds.length+' 个已选群组发布已选内容？请先核对正文和媒体。取消不会创建或发布任务。'))return;
   groupSubmissionBusy=true;button.disabled=true;button.textContent=autoPublish?'正在创建并启动发布…':'正在创建任务…';
   try{
     if(contentMethod==='library'&&libraryPicked.size){
@@ -223,7 +224,6 @@ async function checkGptUpdates(manual=false){
 }
 setInterval(()=>{if(route==='groups'&&workspace&&document.visibilityState!=='hidden')checkGptUpdates()},20000);
 
-  if(autoPublish&&!window.confirm('确认并自动发布：向当前账号 '+account.display_name+' 的 '+groupIds.length+' 个已选群组发布已选内容？请先核对正文和媒体。取消不会创建或发布任务。'))return;
 
 document.addEventListener('click',async event=>{
   const button=event.target.closest('[data-reconcile-theme],[data-reconcile-proactive]');if(!button)return;
