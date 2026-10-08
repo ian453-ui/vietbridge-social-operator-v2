@@ -25,8 +25,21 @@ test('topic radar keeps only canonical post links inside the selected group and 
 test('sync distinguishes login from wrong Page identity without touching existing groups',async()=>{
   const fb=new FacebookBrowser({account:()=>({profile_id:'p',expected_identity:'VietBridge Group'})});
   fb.profile=()=>({});
+  let closes=0;
+  fb.page=async(profile,options)=>{assert.deepEqual(options,{reconcile:true,isolated:true});return {page:{close:async()=>{closes++;}},browser:{close:async()=>{closes++;}}};};
   fb.inspect=async()=>({healthy:false,blocker:'WRONG_IDENTITY',actualIdentity:'Ian Liu'});
   await assert.rejects(fb.discoverGroups('ws','a'),/切换为企业 Page/);
   fb.inspect=async()=>({healthy:false,blocker:'FACEBOOK_LOGIN_REQUIRED'});
   await assert.rejects(fb.discoverGroups('ws','a'),/V1 API 授权不等于 V2 浏览器登录/);
+  assert.equal(closes,4);
+});
+
+test('group discovery holds one isolated read-only session across identity and load failure',async()=>{
+  const fb=new FacebookBrowser({account:()=>({profile_id:'p'})});fb.profile=()=>({id:'p'});
+  let acquisitions=0,closedPages=0,closedConnections=0;
+  const session={page:{goto:async()=>{throw Error('group load timeout');},close:async()=>{closedPages++;}},browser:{close:async()=>{closedConnections++;}}};
+  fb.page=async(profile,options)=>{acquisitions++;assert.deepEqual(options,{reconcile:true,isolated:true});return session;};
+  fb.inspect=async(ws,id,options)=>{assert.equal(options.session,session);assert.equal(closedConnections,0);return {healthy:true,actualIdentity:'LP Travel Visa'};};
+  await assert.rejects(fb.discoverGroups('ws','a'),/group load timeout/);
+  assert.equal(acquisitions,1);assert.equal(closedPages,1);assert.equal(closedConnections,1);
 });
