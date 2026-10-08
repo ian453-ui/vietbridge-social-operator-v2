@@ -82,7 +82,7 @@ export function createApp(dbPath=join(runtime?.dataDir||join(homedir(),'Library/
    if(localOnly&&!localExecution)return send(res,409,{error:'云端执行器尚未连接，此操作暂不可用'});
    if(req.method==='GET'&&url.pathname==='/api/health')return send(res,200,{ok:true,mode:localExecution?'mac-tunnel':'cloud-control-plane',persistent:true,executionConnected:localExecution});
   }
-  if(req.method==='GET'&&['/','/client.js','/unified-client.js','/group-selection.js','/group-filters.js','/publisher-access-ui.js','/publication-selection.js','/styles.css'].includes(url.pathname)){
+  if(req.method==='GET'&&['/','/client.js','/unified-client.js','/publisher-form-state.js','/group-selection.js','/group-filters.js','/publisher-access-ui.js','/publication-selection.js','/styles.css'].includes(url.pathname)){
    const name=url.pathname==='/'?'index.html':url.pathname.slice(1);res.setHeader('Content-Type',name.endsWith('.js')?'text/javascript':name.endsWith('.css')?'text/css':'text/html');return res.end(await readFile(join(root,name)));
   }
   if(req.method==='GET'&&url.pathname==='/api/state')return send(res,200,{...store.view(url.searchParams.get('workspace')),token,unified:Boolean(unified),executionEnabled,integrationAcceptance:Boolean(unified&&!executionEnabled||publisher&&publisherOptions.workerEnabled!==true)});

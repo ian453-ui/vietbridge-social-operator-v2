@@ -1,3 +1,5 @@
+import {PublisherFormDrafts} from './publisher-form-state.js';
+const formDrafts=new PublisherFormDrafts();
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 const platforms={facebook:'Facebook',xiaohongshu:'小红书',wechat_official_account:'微信公众号草稿',wechat_channels:'视频号'};
@@ -77,7 +79,7 @@ export function unifiedPublisherView(workspace,account,contents=[],profiles=[],a
   </section>`;
 }
 
-export async function mountUnifiedPublisher({workspace,account,token,executionEnabled=false,onChanged,contents=[],accounts=[]}) {
+export async function mountUnifiedPublisher({workspace,account,token,executionEnabled=false,onChanged,contents=[],accounts=[],preferredContentId,pendingLibrarySelection=false}) {
   const manager=document.getElementById('unified-account-manager'),form=manager?.querySelector('#unified-account-form');
   if(manager?.dataset.workspace===workspace&&form){
     const status=manager.querySelector('#unified-account-status');
@@ -166,17 +168,19 @@ export async function mountUnifiedPublisher({workspace,account,token,executionEn
     event.preventDefault();const form=event.currentTarget,input=Object.fromEntries(new FormData(form));input.media=input.media.split('\n').map(x=>x.trim()).filter(Boolean);
     run(form.querySelector('button'),async()=>{await request('/content',input);if(root.isConnected)await onChanged();});
   };
-  const select=root.querySelector('#unified-content');
-  const fillPayload=()=>{const content=contents.find(c=>c.id===select.value),p=content?.platform_payloads?.[account.platform]||content||{};root.querySelector('#unified-payload-title').value=p.title||'';root.querySelector('#unified-payload-body').value=p.body||'';root.querySelector('#unified-payload-tags').value=(p.tags||[]).join('\n');root.querySelector('#unified-payload-author').value=p.author||'驻越经营实录';};select.onchange=fillPayload;fillPayload();
+  const select=root.querySelector('#unified-content'),chosen=formDrafts.resolve(workspace,account.id,preferredContentId,contents);if(chosen){select.value=chosen;select.dataset.userPicked='true';}
+  const fillPayload=()=>{const content=contents.find(c=>c.id===select.value),p=pendingLibrarySelection?{}:formDrafts.get(workspace,account.id,select.value)||content?.platform_payloads?.[account.platform]||content||{};if(formDrafts.get(workspace,account.id,select.value))select.dataset.userPicked='true';root.querySelector('#unified-payload-title').value=p.title||'';root.querySelector('#unified-payload-body').value=p.body||'';root.querySelector('#unified-payload-tags').value=(p.tags||[]).join('\n');root.querySelector('#unified-payload-author').value=p.author||account.display_name||'';};select.onchange=()=>{formDrafts.select(workspace,account.id,select.value);fillPayload();};fillPayload();
   let publicationStates;
-  const recommend=async(auto=false)=>{const result=await request('/accounts/'+encodeURIComponent(account.id)+'/content-status');if(!root.isConnected)return;publicationStates=result.states;for(const option of select.options){const row=contents.find(c=>c.id===option.value),states=publicationStates[option.value]||[];option.textContent=(row?.title||option.value)+(states.includes('PUBLISHED')?' · 已发布':states.includes('DRAFT_WRITTEN')?' · 草稿已写入':states.includes('PUBLISHED_ID_PENDING')?' · 列表已确认/ID待核对':states.some(s=>['PREPARING','SUBMITTING','UNKNOWN','READY'].includes(s))?' · 执行中/待核对':' · 无已确认发布记录');}if(auto&&select.dataset.userPicked)return;const next=[...contents].sort((a,b)=>String(a.title||'').localeCompare(String(b.title||''),'zh',{numeric:true})).find(c=>!(publicationStates[c.id]||[]).some(s=>['PUBLISHED','DRAFT_WRITTEN','PUBLISHED_ID_PENDING','PREPARING','SUBMITTING','UNKNOWN','READY'].includes(s)));if(next){select.value=next.id;fillPayload();}else if(!auto)status.textContent='没有可推荐的未发布内容；已发布项仍可手工选择。';};
+  const recommend=async(auto=false)=>{const result=await request('/accounts/'+encodeURIComponent(account.id)+'/content-status');if(!root.isConnected)return;publicationStates=result.states;for(const option of select.options){const row=contents.find(c=>c.id===option.value),states=publicationStates[option.value]||[];option.textContent=(row?.title||option.value)+(states.includes('PUBLISHED')?' · 已发布':states.includes('DRAFT_WRITTEN')?' · 草稿已写入':states.includes('PUBLISHED_ID_PENDING')?' · 列表已确认/ID待核对':states.some(s=>['PREPARING','SUBMITTING','UNKNOWN','READY'].includes(s))?' · 执行中/待核对':' · 无已确认发布记录');}if(pendingLibrarySelection||select.disabled||auto&&select.dataset.userPicked)return;const next=[...contents].sort((a,b)=>String(a.title||'').localeCompare(String(b.title||''),'zh',{numeric:true})).find(c=>!(publicationStates[c.id]||[]).some(s=>['PUBLISHED','DRAFT_WRITTEN','PUBLISHED_ID_PENDING','PREPARING','SUBMITTING','UNKNOWN','READY'].includes(s)));if(next){select.value=next.id;fillPayload();}else if(!auto)status.textContent='没有可推荐的未发布内容；已发布项仍可手工选择。';};
   select.addEventListener('change',()=>select.dataset.userPicked='true');
-  root.querySelectorAll('#unified-payload-title,#unified-payload-body,#unified-payload-tags,#unified-payload-author').forEach(input=>input.addEventListener('input',()=>select.dataset.userPicked='true'));
+  root.querySelectorAll('#unified-payload-title,#unified-payload-body,#unified-payload-tags,#unified-payload-author').forEach(input=>input.addEventListener('input',()=>{select.dataset.userPicked='true';formDrafts.set(workspace,account.id,select.value,{title:root.querySelector('#unified-payload-title').value,body:root.querySelector('#unified-payload-body').value,tags:root.querySelector('#unified-payload-tags').value.split('\n').map(x=>x.trim()).filter(Boolean),author:root.querySelector('#unified-payload-author').value});}));
   
   root.querySelector('#unified-recommend-next').onclick=event=>run(event.currentTarget,()=>recommend());
   recommend(true).catch(error=>{if(root.isConnected)status.textContent=error.message;});
   root.querySelector('#unified-create').onclick=event=>run(event.currentTarget,async()=>{
+    if(pendingLibrarySelection||select.disabled)throw Error('请先选用勾选资料并核对内容');
     await request('/jobs',{account_id:account.id,content_id:select.value,payload:{title:root.querySelector('#unified-payload-title').value,body:root.querySelector('#unified-payload-body').value,tags:root.querySelector('#unified-payload-tags').value.split('\n').map(s=>s.trim()).filter(Boolean),author:root.querySelector('#unified-payload-author').value}});await loadJobs();
   });
+  if(pendingLibrarySelection){select.disabled=true;root.querySelector('#unified-create').disabled=true;status.textContent='资料库选择已变更，请先选用勾选资料；不会使用旧稿建立任务。';}
   await loadJobs();
 }
