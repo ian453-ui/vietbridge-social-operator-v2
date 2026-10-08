@@ -172,6 +172,12 @@ export async function mountUnifiedPublisher({workspace,account,token,executionEn
       });
     });
     jobs.querySelectorAll('[data-finish]').forEach(button=>button.onclick=()=>run(button,async()=>{
+      const job=result.jobs.find(j=>j.id===button.dataset.finish);
+      if(job.state==='UNKNOWN'){
+        if(!window.confirm('只有你已核对平台并确定这篇没有发布，才能结束旧任务并解除阻塞。确认未发布？不确定请取消并只读核对。'))return;
+        await request('/jobs/'+encodeURIComponent(job.id)+'/finish-unpublished',{confirm_not_published:true,snapshot_hash:job.snapshot_hash,authorization_source:'Publisher 用户明确确认冻结任务未发布'});
+        await loadJobs();return;
+      }
       if(!window.confirm('结束本任务的处理？历史结果会保留，UNKNOWN 仍需核对，不会删除平台作品。'))return;
       await request('/jobs/'+encodeURIComponent(button.dataset.finish)+'/finish',{});await loadJobs();
     }));

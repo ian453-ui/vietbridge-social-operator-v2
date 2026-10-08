@@ -188,4 +188,20 @@ export class UnifiedExecutor {
       return this.publisher.job(workspace,id);
     }finally{try{await driver?.close();}finally{try{release?.();}finally{this.active.delete(job.snapshot.profileId);}}}
   }
+  resolveNotPublished(workspace,id,input={}) {
+    const job=this.publisher.job(workspace,id);
+    if(job.state!=='UNKNOWN'||input.confirm_not_published!==true||input.snapshot_hash!==job.snapshot_hash||typeof input.authorization_source!=='string'||!input.authorization_source.trim()||input.authorization_source.length>500)throw Error('需要用户明确确认该冻结任务未发布，并提供授权来源');
+    if(this.active.has(job.snapshot.profileId))throw Error('该账号仍在执行任务，不能人工解除');
+    const release=this.acquireResources(job.snapshot,{reconcile:true});
+    try{
+      return this.publisher.store.tx(()=>{
+        const current=this.publisher.job(workspace,id);
+        if(current.state!=='UNKNOWN'||current.snapshot_hash!==input.snapshot_hash)throw Error('任务状态或冻结版本已改变');
+        const time=new Date().toISOString(),evidence={...current.evidence,operatorFinished:true,humanResolution:{outcome:'NOT_PUBLISHED',at:time,source:input.authorization_source.trim(),previousState:'UNKNOWN',snapshotHash:current.snapshot_hash,accountId:current.account_id}};
+        this.db.prepare("UPDATE publisher_jobs SET state='CANCELLED',evidence_json=?,updated_at=? WHERE id=? AND state='UNKNOWN'").run(JSON.stringify(evidence),time,id);
+        this.publisher.store.event(workspace,'publisher_unknown_resolved_not_published',{job_id:id,snapshot_hash:current.snapshot_hash,authorization_source:input.authorization_source.trim()});
+        return this.publisher.job(workspace,id);
+      });
+    }finally{release();}
+  }
 }

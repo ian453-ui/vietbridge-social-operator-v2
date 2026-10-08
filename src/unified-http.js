@@ -1,6 +1,12 @@
 import {executionScope} from './single-execution-permit.js';
 /** Authenticated parent server calls this only after Host/auth/Origin/CSRF validation. */
 export function unifiedRoute(publisher, method, url, input={},executor=null) {
+  const notPublished=url.pathname.match(/^\/api\/unified\/workspaces\/([^/]+)\/jobs\/([^/]+)\/finish-unpublished$/);
+  if(notPublished){
+    if(method!=='POST')return {status:405,body:{error:'METHOD_NOT_ALLOWED'}};
+    if(!executor)throw Error('执行器未接入');
+    return {status:200,body:executor.resolveNotPublished(decodeURIComponent(notPublished[1]),decodeURIComponent(notPublished[2]),input)};
+  }
   const operatorAction=url.pathname.match(/^\/api\/unified\/workspaces\/([^/]+)\/jobs\/([^/]+)\/(finish|manual-complete)$/);
   if(operatorAction){
     if(method!=='POST')return {status:405,body:{error:'METHOD_NOT_ALLOWED'}};
