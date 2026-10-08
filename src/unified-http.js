@@ -1,6 +1,12 @@
 import {executionScope} from './single-execution-permit.js';
 /** Authenticated parent server calls this only after Host/auth/Origin/CSRF validation. */
 export function unifiedRoute(publisher, method, url, input={},executor=null) {
+  const operatorAction=url.pathname.match(/^\/api\/unified\/workspaces\/([^/]+)\/jobs\/([^/]+)\/(finish|manual-complete)$/);
+  if(operatorAction){
+    if(method!=='POST')return {status:405,body:{error:'METHOD_NOT_ALLOWED'}};
+    const workspace=decodeURIComponent(operatorAction[1]),id=decodeURIComponent(operatorAction[2]);
+    return {status:200,body:operatorAction[3]==='finish'?publisher.finish(workspace,id):publisher.manualComplete(workspace,id,input)};
+  }
   const diagnostic=url.pathname.match(/^\/api\/unified\/workspaces\/([^/]+)\/jobs\/([^/]+)\/diagnostics$/);
   if(diagnostic){if(!executor?.diagnostics)throw Error('只读诊断未接入');const ws=decodeURIComponent(diagnostic[1]),id=decodeURIComponent(diagnostic[2]);if(method==='GET')return {status:200,body:executor.diagnostics.view(ws,id)};if(method==='POST')return {status:202,body:executor.diagnostics.start(ws,id,input)};return {status:405,body:{error:'METHOD_NOT_ALLOWED'}};}
   const capability=url.pathname.match(/^\/api\/unified\/workspaces\/([^/]+)\/jobs\/([^/]+)\/execution-capability$/);

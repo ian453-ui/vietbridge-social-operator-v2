@@ -183,7 +183,8 @@ export class UnifiedExecutor {
       driver.restore?.(job.snapshot,assets.map(x=>x.path),intent?JSON.parse(intent.prepared_json):null);
       let receipt=this.db.prepare('SELECT platform_id AS id,platform_url AS url FROM publisher_submit_receipts WHERE job_id=?').get(id);
       if(!receipt&&input.platform_id){if(!/^[A-Za-z0-9_-]{1,160}$/.test(String(input.platform_id)))throw Error('平台作品 ID 格式无效');receipt={id:String(input.platform_id),url:''};}
-      this.complete(workspace,id,await driver.readback(job.snapshot,receipt));
+      const evidence=await driver.readback(job.snapshot,receipt);
+      this.complete(workspace,id,{...evidence,...(job.evidence.humanConfirmation?{humanConfirmation:job.evidence.humanConfirmation,previousError:job.evidence.error}:{} )});
       return this.publisher.job(workspace,id);
     }finally{try{await driver?.close();}finally{try{release?.();}finally{this.active.delete(job.snapshot.profileId);}}}
   }

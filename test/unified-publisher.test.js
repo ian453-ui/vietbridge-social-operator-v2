@@ -7,6 +7,35 @@ import {Store} from '../src/store.js';
 import {UnifiedPublisher} from '../src/unified-publisher.js';
 import {unifiedRoute} from '../src/unified-http.js';
 import {unifiedPublisherView} from '../src/unified-client.js';
+import {taskOperatorButtons} from '../src/unified-client.js';
+
+test('all platforms retain three operator buttons without unsafe retry on unknown',()=>{
+ for(const platform of ['facebook','xiaohongshu','wechat_official_account','wechat_channels']){
+  const html=taskOperatorButtons({id:'job',state:'UNKNOWN',snapshot:{platform},evidence:{}});
+  for(const text of ['重试（先只读核对）','结束任务','手工确认发布完成'])assert.ok(html.includes(text));
+ }
+});
+test('human completion records exact frozen task and does not claim platform verification',t=>{
+ const {store,publisher,a,b,create}=fixture(t),job=create();
+ assert.throws(()=>publisher.manualComplete(b.id,job.id,{}),/当前客户/);
+ assert.throws(()=>publisher.manualComplete(a.id,job.id,{acknowledge:true,snapshot_hash:'wrong',platform_id:'123'}),/冻结任务/);
+ assert.throws(()=>publisher.manualComplete(a.id,job.id,{acknowledge:true,snapshot_hash:job.snapshot_hash,url:'https://example.com/post'}),/平台不符/);
+ store.db.prepare("UPDATE publisher_jobs SET state='UNKNOWN',evidence_json=? WHERE id=?").run(JSON.stringify({error:'old uncertainty'}),job.id);
+ const result=publisher.manualComplete(a.id,job.id,{acknowledge:true,snapshot_hash:job.snapshot_hash,url:'https://www.facebook.com/10001/posts/123'});
+ assert.equal(result.state,'UNKNOWN');assert.equal(result.evidence.verified,false);
+ assert.equal(result.evidence.error,'old uncertainty');assert.equal(result.evidence.humanConfirmation.previousState,'UNKNOWN');
+ assert.throws(()=>publisher.createPageJob(a.id,{account_id:job.account_id,content_id:job.content_id}),/相同目标/);
+ assert.equal(store.db.prepare('SELECT count(*) n FROM attempts').get().n,0);
+});
+test('finish preserves unknown outcome and closes unsubmitted work without deletion',t=>{
+ const {store,publisher,a,create}=fixture(t),job=create();
+ store.db.prepare("UPDATE publisher_jobs SET state='UNKNOWN' WHERE id=?").run(job.id);
+ const ended=publisher.finish(a.id,job.id);
+ assert.equal(ended.state,'UNKNOWN');assert.equal(ended.evidence.operatorFinished,true);
+ assert.throws(()=>publisher.assertCurrent(ended),/已结束处理/);
+ store.db.prepare("UPDATE publisher_jobs SET state='SUBMITTING' WHERE id=?").run(job.id);
+ assert.throws(()=>publisher.finish(a.id,job.id),/不能强行结束/);
+});
 
 function fixture(t) {
   const root=mkdtempSync(join(tmpdir(),'vb-unified-')),path=join(root,'publisher.sqlite');

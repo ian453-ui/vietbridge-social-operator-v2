@@ -214,6 +214,7 @@ export class UnifiedPublisher {
     });
   }
   assertCurrent(job) {
+    if(job.evidence?.operatorFinished)fail('任务已结束处理，不可再次发布');
     const {account,profile}=this.context(job.workspace,job.account_id),s=job.snapshot;
     if(platformOf(s)!==account.platform||digest(s.options||{})!==digest(account.publisher_options||{}))fail('平台或账号配置已变化，请重新创建任务');
     if(account.platform==='facebook'&&(!s.operatorActorId||!s.targetPageId||s.operatorActorId!==account.operator_actor_id||s.targetPageId!==account.target_page_id))fail('操作 actor 或目标 Page 未冻结或已变化，请重新创建任务');
@@ -224,6 +225,40 @@ export class UnifiedPublisher {
     if(digest(s)!==job.snapshot_hash)fail('任务快照已损坏');
     if(s.transport==='API' && this.credentialReference(s.credentialRef)!==s.credentialRef)fail('任务 API 授权配置路径已变化');
     if(s.transport==='API'&&account.config_url!==s.credentialRef)fail('账号授权配置引用已变化，请重新创建任务');
+  }
+  finish(workspace,id) {
+    return this.store.tx(()=>{
+      const job=this.job(workspace,id);
+      if(['PREPARING','SUBMITTING'].includes(job.state))fail('任务正在执行，不能强行结束；请等待提交结果后核对');
+      const evidence={...job.evidence,operatorFinished:true,operatorFinishedAt:new Date().toISOString()};
+      const state=['DRAFT','READY','BLOCKED'].includes(job.state)?'CANCELLED':job.state;
+      this.db.prepare('UPDATE publisher_jobs SET state=?,evidence_json=?,updated_at=? WHERE id=?').run(state,JSON.stringify(evidence),evidence.operatorFinishedAt,id);
+      this.store.event(workspace,'publisher_task_finished',{job_id:id,previous_state:job.state,state});
+      return this.job(workspace,id);
+    });
+  }
+  manualComplete(workspace,id,input={}) {
+    return this.store.tx(()=>{
+      const job=this.job(workspace,id);
+      if(!['DRAFT','READY','BLOCKED','UNKNOWN'].includes(job.state))fail('当前状态不能人工确认完成');
+      if(input.acknowledge!==true||input.snapshot_hash!==job.snapshot_hash||digest(job.snapshot)!==job.snapshot_hash)fail('请明确确认当前冻结任务和目标账号');
+      let platformId=String(input.platform_id||'').trim();const url=String(input.url||'').trim();
+      if(!platformId&&!url)fail('请提供平台作品链接或作品 ID');
+      if(platformId&&!/^[A-Za-z0-9_-]{1,160}$/.test(platformId))fail('平台作品 ID 格式无效');
+      if(url){
+        let parsed;try{parsed=new URL(url);}catch{fail('作品链接格式无效');}
+        const domains={facebook:['facebook.com'],xiaohongshu:['xiaohongshu.com','xhslink.com'],wechat_official_account:['mp.weixin.qq.com'],wechat_channels:['weixin.qq.com']};
+        if(parsed.protocol!=='https:'||parsed.username||parsed.password||!(domains[platformOf(job.snapshot)]||[]).some(d=>parsed.hostname===d||parsed.hostname.endsWith('.'+d)))fail('作品链接与任务平台不符');
+        if(url.length>2048||[...parsed.searchParams.keys()].some(k=>/token|secret|password|cookie/i.test(k)))fail('作品链接不能包含凭据或私密令牌');
+        if(!platformId&&platformOf(job.snapshot)==='facebook')platformId=parsed.pathname.match(/\/posts\/([A-Za-z0-9_-]+)/)?.[1]||parsed.searchParams.get('story_fbid')||'';
+        if(!platformId&&platformOf(job.snapshot)==='xiaohongshu')platformId=parsed.pathname.match(/\/(?:explore|discovery\/item)\/([A-Za-z0-9_-]+)/)?.[1]||'';
+        if(platformId&&!/^[A-Za-z0-9_-]{1,160}$/.test(platformId))fail('平台作品 ID 格式无效');
+      }
+      const time=new Date().toISOString(),evidence={...job.evidence,humanConfirmation:{at:time,previousState:job.state,platformId,url,snapshotHash:job.snapshot_hash,accountId:job.account_id},verified:false};
+      this.db.prepare("UPDATE publisher_jobs SET state='UNKNOWN',evidence_json=?,updated_at=? WHERE id=?").run(JSON.stringify(evidence),time,id);
+      this.store.event(workspace,'publisher_completion_human_confirmed',{job_id:id,snapshot_hash:job.snapshot_hash,platform_id:platformId,url,previous_state:job.state});
+      return this.job(workspace,id);
+    });
   }
   cancel(workspace,id) {
     return this.store.tx(()=>{

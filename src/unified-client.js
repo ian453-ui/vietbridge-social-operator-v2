@@ -4,6 +4,12 @@ const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;
 
 const platforms={facebook:'Facebook',xiaohongshu:'小红书',wechat_official_account:'微信公众号草稿',wechat_channels:'视频号'};
 const states={DRAFT_WRITTEN:'草稿已写入 · 未发表',PUBLISHED_ID_PENDING:'已确认发表 · 公开 ID 待取得'};
+export function taskOperatorButtons(job){
+ const running=['PREPARING','SUBMITTING'].includes(job.state),closed=job.evidence?.operatorFinished;
+ const retry=!closed&&(['BLOCKED','UNKNOWN'].includes(job.state)||job.state==='READY'&&job.canExecute);
+ const manual=['DRAFT','READY','BLOCKED','UNKNOWN'].includes(job.state);
+ return `<div class="task-operator-actions"><button data-retry="${esc(job.id)}" ${retry?'':'disabled'}>${job.state==='UNKNOWN'?'重试（先只读核对）':'重试'}</button><button data-finish="${esc(job.id)}" ${running||closed?'disabled':''}>结束任务</button><button data-manual-complete="${esc(job.id)}" ${manual?'':'disabled'}>手工确认发布完成</button></div>${closed?'<p>已结束处理；历史发布结果与待核对记录仍保留。</p>':''}`;
+}
 export function confirmationScope(job) {
   const s=job.snapshot;
   return {job_id:job.id,content_id:job.content_id,workspace:job.workspace,account_id:job.account_id,operator_actor_id:s.operatorActorId,target_page_id:s.targetPageId,platform:s.platform,transport:s.transport,snapshot_hash:job.snapshot_hash,media_count:s.media.length};
@@ -131,6 +137,7 @@ export async function mountUnifiedPublisher({workspace,account,token,executionEn
     if(!root.isConnected||requestRevision!==revision)return;
     jobs.innerHTML=result.jobs.map(job=>`<article class="panel"><b>${esc(job.snapshot.title||job.content_id)} · ${esc(states[job.state]||job.state)}</b>
       <p>${esc(platforms[job.snapshot.platform||'facebook'])} · ${esc(job.snapshot.expectedIdentity)} · ${esc(job.snapshot.externalId)} · ${esc(job.snapshot.transport)}</p>
+      ${job.evidence.humanConfirmation?`<p>已记录人工确认 · ${job.evidence.verified?'平台已核验':'等待平台核验，不会自动重发'}</p>`:''}
       <details><summary>核对冻结正文与媒体</summary><pre>${esc(job.snapshot.body)}</pre><pre>${esc(job.snapshot.media.join('\n'))}</pre></details>
       ${job.state==='DRAFT'?`<button class="primary" data-approve-auto="${esc(job.id)}">${job.snapshot.platform==='wechat_official_account'?'确认并自动写入草稿':'确认并自动发布'}</button><button data-approve="${esc(job.id)}">仅确认版本（稍后手动发布）</button>`:''}
       ${executionButton(wasAttempted(job)?{...job,canExecute:false,execution:{...job.execution,reason:'本页面已发送一次执行请求；只读核对结果，不自动重试'}}:job)}
@@ -140,6 +147,7 @@ export async function mountUnifiedPublisher({workspace,account,token,executionEn
       ${job.evidence.url?`<a target="_blank" rel="noopener" href="${esc(job.evidence.url)}">查看平台作品</a>`:''}
       ${job.evidence.error?`<p>${esc(job.evidence.error)}</p>`:''}
       ${['DRAFT','READY','BLOCKED'].includes(job.state)?`<button data-cancel="${esc(job.id)}">取消任务</button>`:''}
+      ${taskOperatorButtons(job)}
       </article>`).join('')||'<p>当前范围没有发布任务。</p>';
     jobs.querySelectorAll('[data-approve]').forEach(button=>button.onclick=()=>run(button,async()=>{
       const job=result.jobs.find(j=>j.id===button.dataset.approve);
@@ -152,6 +160,31 @@ export async function mountUnifiedPublisher({workspace,account,token,executionEn
     jobs.querySelectorAll('[data-resolve-preparation]').forEach(button=>button.onclick=()=>run(button,async()=>{if(!window.confirm('准备上传可能已产生临时对象。确认已检查现场，并仅恢复到阻断待审核状态？不会删除平台数据或自动重试。'))return;await request(`/jobs/${encodeURIComponent(button.dataset.resolvePreparation)}/resolve-preparation`,{acknowledge_preparation_effects:true});await loadJobs();}));
     jobs.querySelectorAll('[data-execute]').forEach(button=>button.onclick=()=>showConfirmation(button,result.jobs.find(j=>j.id===button.dataset.execute)));
     jobs.querySelectorAll('[data-execute-manual]').forEach(button=>button.onclick=()=>showConfirmation(button,result.jobs.find(j=>j.id===button.dataset.executeManual),true));
+    jobs.querySelectorAll('[data-retry]').forEach(button=>button.onclick=()=>{
+      const job=result.jobs.find(j=>j.id===button.dataset.retry);
+      if(job.state==='READY')return showConfirmation(button,job);
+      return run(button,async()=>{
+        if(job.state==='UNKNOWN'){
+          status.textContent='只读核对旧任务，不会再次发布';
+          await request('/jobs/'+encodeURIComponent(job.id)+'/reconcile',{});
+        }else await request('/jobs/'+encodeURIComponent(job.id)+'/reopen',{});
+        await loadJobs();
+      });
+    });
+    jobs.querySelectorAll('[data-finish]').forEach(button=>button.onclick=()=>run(button,async()=>{
+      if(!window.confirm('结束本任务的处理？历史结果会保留，UNKNOWN 仍需核对，不会删除平台作品。'))return;
+      await request('/jobs/'+encodeURIComponent(button.dataset.finish)+'/finish',{});await loadJobs();
+    }));
+    jobs.querySelectorAll('[data-manual-complete]').forEach(button=>button.onclick=()=>run(button,async()=>{
+      const job=result.jobs.find(j=>j.id===button.dataset.manualComplete),reference=window.prompt('请填写你已在平台核对的作品链接或作品 ID。公众号仅代表草稿写入，不代表公开发表。');
+      if(!reference?.trim())return;
+      if(!window.confirm('确认已在 '+job.snapshot.expectedIdentity+' 上核对该冻结稿件及媒体？将记录人工确认，保留旧证据，不会发帖。'))return;
+      const input={acknowledge:true,snapshot_hash:job.snapshot_hash,...(/^https?:\/\//i.test(reference.trim())?{url:reference.trim()}:{platform_id:reference.trim()})};
+      const reported=await request('/jobs/'+encodeURIComponent(job.id)+'/manual-complete',input);
+      try{await request('/jobs/'+encodeURIComponent(job.id)+'/reconcile',{platform_id:reported.evidence.humanConfirmation.platformId||undefined});}
+      catch(error){if(root.isConnected)status.textContent='人工确认已记录，但平台核验未通过：'+error.message+'；保留待核对状态，不会重发。';}
+      await loadJobs();
+    }));
     async function diagnosticProgress(id){const value=await request(`/jobs/${encodeURIComponent(id)}/diagnostics`);if(root.isConnected){const box=jobs.querySelector(`[data-diagnostic-report="${id}"]`);if(box)box.textContent=JSON.stringify(value,null,2);}return value;}
     jobs.querySelectorAll('[data-diagnostic-refresh]').forEach(button=>button.onclick=()=>run(button,()=>diagnosticProgress(button.dataset.diagnosticRefresh)));
     jobs.querySelectorAll('[data-diagnose]').forEach(button=>button.onclick=()=>run(button,async()=>{const job=result.jobs.find(j=>j.id===button.dataset.diagnose);await request(`/jobs/${encodeURIComponent(job.id)}/diagnostics`,{snapshot_hash:job.snapshot_hash});for(let i=0;i<45&&root.isConnected&&button.isConnected;i++){const value=await diagnosticProgress(job.id);if(value.state!=='RUNNING')return;await new Promise(resolve=>setTimeout(resolve,2000));}if(root.isConnected)status.textContent='诊断仍在运行或页面已切换；只读取进度，不会再次启动。';},{enableAfter:false}));
@@ -175,7 +208,7 @@ export async function mountUnifiedPublisher({workspace,account,token,executionEn
   const select=root.querySelector('#unified-content'),chosen=formDrafts.resolve(workspace,account.id,preferredContentId,contents);if(chosen){select.value=chosen;select.dataset.userPicked='true';}
   const fillPayload=()=>{const content=contents.find(c=>c.id===select.value),p=pendingLibrarySelection?{}:publisherPayload(content,account.platform,formDrafts.get(workspace,account.id,select.value));if(formDrafts.get(workspace,account.id,select.value))select.dataset.userPicked='true';root.querySelector('#unified-payload-title').value=p.title||'';root.querySelector('#unified-payload-body').value=p.body||'';root.querySelector('#unified-payload-tags').value=(p.tags||[]).join('\n');root.querySelector('#unified-payload-author').value=p.author||account.display_name||'';let media=[];try{media=content?.platform_payloads?.[account.platform]?.media||JSON.parse(content?.media_json||'[]')}catch{}const preview=root.querySelector('#unified-media-preview');preview.innerHTML=pendingLibrarySelection?'':media.length?media.map((path,index)=>{const url='/api/group-library/content-media?workspace='+encodeURIComponent(workspace)+'&contentId='+encodeURIComponent(select.value)+'&index='+index+'&platform='+encodeURIComponent(account.platform);return /\.mp4$/i.test(path)?'<video controls preload="none" src="'+esc(url)+'"></video>':'<a target="_blank" rel="noopener" href="'+esc(url)+'"><img loading="lazy" src="'+esc(url)+'" alt="已绑定图片 '+(index+1)+'"></a>'}).join(''):'<p>本稿未绑定头图或媒体。</p>';};select.onchange=()=>{formDrafts.select(workspace,account.id,select.value);fillPayload();};fillPayload();
   let publicationStates;
-  const recommend=async(auto=false)=>{const result=await request('/accounts/'+encodeURIComponent(account.id)+'/content-status');if(!root.isConnected)return;publicationStates=result.states;for(const option of select.options){const row=contents.find(c=>c.id===option.value),states=publicationStates[option.value]||[];option.textContent=(row?.title||option.value)+(states.includes('PUBLISHED')?' · 已发布':states.includes('DRAFT_WRITTEN')?' · 草稿已写入':states.includes('PUBLISHED_ID_PENDING')?' · 列表已确认/ID待核对':states.some(s=>['PREPARING','SUBMITTING','UNKNOWN','READY'].includes(s))?' · 执行中/待核对':' · 无已确认发布记录');}if(pendingLibrarySelection||select.disabled||auto&&select.dataset.userPicked)return;const next=[...contents].sort((a,b)=>String(a.title||'').localeCompare(String(b.title||''),'zh',{numeric:true})).find(c=>!(publicationStates[c.id]||[]).some(s=>['PUBLISHED','DRAFT_WRITTEN','PUBLISHED_ID_PENDING','PREPARING','SUBMITTING','UNKNOWN','READY'].includes(s)));if(next){select.value=next.id;fillPayload();}else if(!auto)status.textContent='没有可推荐的未发布内容；已发布项仍可手工选择。';};
+  const recommend=async(auto=false)=>{const result=await request('/accounts/'+encodeURIComponent(account.id)+'/content-status');if(!root.isConnected)return;publicationStates=result.states;for(const option of select.options){const row=contents.find(c=>c.id===option.value),states=publicationStates[option.value]||[];option.textContent=(row?.title||option.value)+(states.includes('HUMAN_CONFIRMED')?' · 人工确认完成':states.includes('PUBLISHED')?' · 已发布':states.includes('DRAFT_WRITTEN')?' · 草稿已写入':states.includes('PUBLISHED_ID_PENDING')?' · 列表已确认/ID待核对':states.some(s=>['PREPARING','SUBMITTING','UNKNOWN','READY'].includes(s))?' · 执行中/待核对':' · 无已确认发布记录');}if(pendingLibrarySelection||select.disabled||auto&&select.dataset.userPicked)return;const next=[...contents].sort((a,b)=>String(a.title||'').localeCompare(String(b.title||''),'zh',{numeric:true})).find(c=>!(publicationStates[c.id]||[]).some(s=>['HUMAN_CONFIRMED','PUBLISHED','DRAFT_WRITTEN','PUBLISHED_ID_PENDING','PREPARING','SUBMITTING','UNKNOWN','READY'].includes(s)));if(next){select.value=next.id;fillPayload();}else if(!auto)status.textContent='没有可推荐的未发布内容；已发布项仍可手工选择。';};
   select.addEventListener('change',()=>select.dataset.userPicked='true');
   root.querySelectorAll('#unified-payload-title,#unified-payload-body,#unified-payload-tags,#unified-payload-author').forEach(input=>input.addEventListener('input',()=>{select.dataset.userPicked='true';formDrafts.set(workspace,account.id,select.value,{title:root.querySelector('#unified-payload-title').value,body:root.querySelector('#unified-payload-body').value,tags:root.querySelector('#unified-payload-tags').value.split('\n').map(x=>x.trim()).filter(Boolean),author:root.querySelector('#unified-payload-author').value});}));
   
