@@ -1,7 +1,15 @@
+import {PublisherFormDrafts,publisherPayload} from './publisher-form-state.js';
+const formDrafts=new PublisherFormDrafts();
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 const platforms={facebook:'Facebook',xiaohongshu:'小红书',wechat_official_account:'微信公众号草稿',wechat_channels:'视频号'};
 const states={DRAFT_WRITTEN:'草稿已写入 · 未发表',PUBLISHED_ID_PENDING:'已确认发表 · 公开 ID 待取得'};
+export function taskOperatorButtons(job){
+ const running=['PREPARING','SUBMITTING'].includes(job.state),closed=job.evidence?.operatorFinished;
+ const retry=!closed&&(['BLOCKED','UNKNOWN'].includes(job.state)||job.state==='READY'&&job.canExecute);
+ const manual=['DRAFT','READY','BLOCKED','UNKNOWN'].includes(job.state);
+ return `<div class="task-operator-actions"><button data-retry="${esc(job.id)}" ${retry?'':'disabled'}>${job.state==='UNKNOWN'?'重试（先只读核对）':'重试'}</button><button data-finish="${esc(job.id)}" ${running||closed?'disabled':''}>结束任务</button><button data-manual-complete="${esc(job.id)}" ${manual?'':'disabled'}>手工确认发布完成</button></div>${closed?'<p>已结束处理；历史发布结果与待核对记录仍保留。</p>':''}`;
+}
 export function confirmationScope(job) {
   const s=job.snapshot;
   return {job_id:job.id,content_id:job.content_id,workspace:job.workspace,account_id:job.account_id,operator_actor_id:s.operatorActorId,target_page_id:s.targetPageId,platform:s.platform,transport:s.transport,snapshot_hash:job.snapshot_hash,media_count:s.media.length};
@@ -31,18 +39,18 @@ export class ExecutionConfirmation {
     }finally{this.busy=false;}
   }
 }
-export function executionConfirmationView(job) {
-  const s=job.snapshot;
-  return `<h2 id="execution-confirmation-title">确认执行此任务${job.execution?.mode==='SINGLE_USE'?'一次':''}</h2><p>只有点击“确认并执行一次”才会提交。取消或按 Esc 不会发布。</p>
+export function executionConfirmationView(job,manual=false) {
+  const s=job.snapshot,label=manual?'确认并手动触发发布':job.execution?.mode==='SINGLE_USE'?'确认并执行一次':s.platform==='wechat_official_account'?'确认并自动写入草稿':'确认并自动发布';
+  return `<h2 id="execution-confirmation-title">确认执行此任务${job.execution?.mode==='SINGLE_USE'?'一次':''}</h2><p>只有点击“${esc(label)}”才会提交。取消或按 Esc 不会发布。</p>
     <dl><dt>客户</dt><dd>${esc(job.workspace)}</dd><dt>账号</dt><dd>${esc(s.expectedIdentity)} · ${esc(job.account_id)}</dd><dt>Actor</dt><dd>${esc(s.operatorActorId||s.externalId)}</dd><dt>目标 Page／平台身份</dt><dd>${esc(s.targetPageId||s.externalId)}</dd><dt>平台／方式</dt><dd>${esc(s.platform)} · ${esc(s.transport)}</dd><dt>任务</dt><dd>${esc(job.id)}</dd><dt>内容／冻结 hash</dt><dd>${esc(job.content_id)}<br>${esc(job.snapshot_hash)}</dd><dt>许可有效至</dt><dd>${esc(job.execution?.expiresAt||'按当前任务执行权限核对')}</dd></dl>
     <h3>冻结正文</h3><pre>${esc(s.body)}</pre><p>媒体：${s.media.length} 项</p><pre>${esc(s.media.join('\n'))}</pre>
-    <p data-confirm-status role="status" aria-live="polite"></p><button type="button" data-confirm-cancel>取消</button><button type="button" data-confirm-submit>确认并执行一次</button>`;
+    <p data-confirm-status role="status" aria-live="polite"></p><button type="button" data-confirm-cancel>取消</button><button type="button" data-confirm-submit>${esc(label)}</button>`;
 }
 export function executionButton(job) {
   if(job.state!=='READY')return '';
   const allowed=job.canExecute===true;
-  const label=allowed?(job.execution?.mode==='SINGLE_USE'?'执行此任务一次':'执行已确认发布'):'当前任务不可执行';
-  return `<button data-execute="${esc(job.id)}" ${allowed?'':'disabled'}>${label}</button>${job.execution?.expiresAt?`<small>单次许可有效至 ${esc(job.execution.expiresAt)}</small>`:''}${!allowed&&job.execution?.reason?`<p>${esc(job.execution.reason)}</p>`:''}`;
+  const label=(job.execution?.mode==='SINGLE_USE'?'执行此任务一次':job.snapshot?.platform==='wechat_official_account'?'确认并自动写入草稿':'确认并自动发布');
+  return `<button data-execute="${esc(job.id)}" ${allowed?'':'disabled'}>${label}</button><button data-execute-manual="${esc(job.id)}" ${allowed?'':'disabled'}>手动触发发布（备用）</button>${job.execution?.expiresAt?`<small>单次许可有效至 ${esc(job.execution.expiresAt)}</small>`:''}${!allowed&&job.execution?.reason?`<p>${esc(job.execution.reason)}</p>`:''}`;
 }
 export function unifiedPublisherView(workspace,account,contents=[],profiles=[],accounts=[]) {
   if(!workspace)return '<section class="panel empty">请选择客户与运营账号。</section>';
@@ -71,13 +79,14 @@ export function unifiedPublisherView(workspace,account,contents=[],profiles=[],a
     </form>
     <button type="button" id="unified-recommend-next">推荐下一篇未发布内容</button><label>选择共享内容<select id="unified-content">${contents.map(c=>`<option value="${esc(c.id)}">${esc(c.title||c.id)}</option>`).join('')}</select></label>
     <label>本平台标题<input id="unified-payload-title"></label><label>本平台正文／公众号 Markdown<textarea id="unified-payload-body"></textarea></label><label>话题（每行一个，不带 #）<textarea id="unified-payload-tags"></textarea></label><label>公众号作者<input id="unified-payload-author" value="驻越经营实录"></label>
+    <div id="unified-media-preview" class="media-preview"></div>
     <button id="unified-create" ${(!account.platform||account.platform==='facebook')&&account.identity_type!=='PAGE'||!contents.length?'disabled':''}>创建${account.platform==='wechat_official_account'?'草稿':'发布'}预览</button>
     <label><input type="checkbox" id="unified-all-accounts">查看当前客户全部账号的任务</label>
     <p id="unified-status" role="status"></p><div id="unified-jobs"></div>
   </section>`;
 }
 
-export async function mountUnifiedPublisher({workspace,account,token,executionEnabled=false,onChanged,contents=[],accounts=[]}) {
+export async function mountUnifiedPublisher({workspace,account,token,executionEnabled=false,onChanged,contents=[],accounts=[],preferredContentId,pendingLibrarySelection=false}) {
   const manager=document.getElementById('unified-account-manager'),form=manager?.querySelector('#unified-account-form');
   if(manager?.dataset.workspace===workspace&&form){
     const status=manager.querySelector('#unified-account-status');
@@ -107,9 +116,9 @@ export async function mountUnifiedPublisher({workspace,account,token,executionEn
   const attempted=new Set(),attemptKey=job=>`publisher-execution-attempt:${job.id}:${job.snapshot_hash}`;
   const wasAttempted=job=>{try{return attempted.has(job.id)||sessionStorage.getItem(attemptKey(job))==='sent';}catch{return attempted.has(job.id);}};
   function closeConfirmation(){activeConfirmation?.();activeConfirmation=null;}
-  function showConfirmation(button,job){
+  function showConfirmation(button,job,manual=false){
     if(activeConfirmation||wasAttempted(job)||!root.isConnected)return;
-    const dialog=document.createElement('dialog');dialog.className='execution-confirmation';dialog.setAttribute('aria-labelledby','execution-confirmation-title');dialog.setAttribute('aria-modal','true');dialog.innerHTML=executionConfirmationView(job);root.append(dialog);
+    const dialog=document.createElement('dialog');dialog.className='execution-confirmation';dialog.setAttribute('aria-labelledby','execution-confirmation-title');dialog.setAttribute('aria-modal','true');dialog.innerHTML=executionConfirmationView(job,manual);root.append(dialog);
     const generation=revision,confirm=dialog.querySelector('[data-confirm-submit]'),cancel=dialog.querySelector('[data-confirm-cancel]'),message=dialog.querySelector('[data-confirm-status]');
     const current=()=>root.isConnected&&dialog.isConnected&&root.dataset.workspace===workspace&&root.dataset.account===account.id&&generation===revision;
     const model=new ExecutionConfirmation({job,isCurrent:current,readCapability:()=>request(`/jobs/${encodeURIComponent(job.id)}/execution-capability`),submit:()=>request(`/jobs/${encodeURIComponent(job.id)}/execute`,{}),readback:()=>loadJobs(),onAttempt:()=>{attempted.add(job.id);try{sessionStorage.setItem(attemptKey(job),'sent');}catch{};}});
@@ -128,8 +137,9 @@ export async function mountUnifiedPublisher({workspace,account,token,executionEn
     if(!root.isConnected||requestRevision!==revision)return;
     jobs.innerHTML=result.jobs.map(job=>`<article class="panel"><b>${esc(job.snapshot.title||job.content_id)} · ${esc(states[job.state]||job.state)}</b>
       <p>${esc(platforms[job.snapshot.platform||'facebook'])} · ${esc(job.snapshot.expectedIdentity)} · ${esc(job.snapshot.externalId)} · ${esc(job.snapshot.transport)}</p>
+      ${job.evidence.humanConfirmation?`<p>已记录人工确认 · ${job.evidence.verified?'平台已核验':'等待平台核验，不会自动重发'}</p>`:''}
       <details><summary>核对冻结正文与媒体</summary><pre>${esc(job.snapshot.body)}</pre><pre>${esc(job.snapshot.media.join('\n'))}</pre></details>
-      ${job.state==='DRAFT'?`<button data-approve="${esc(job.id)}">确认此版本</button>`:''}
+      ${job.state==='DRAFT'?`<button class="primary" data-approve-auto="${esc(job.id)}">${job.snapshot.platform==='wechat_official_account'?'确认并自动写入草稿':'确认并自动发布'}</button><button data-approve="${esc(job.id)}">仅确认版本（稍后手动发布）</button>`:''}
       ${executionButton(wasAttempted(job)?{...job,canExecute:false,execution:{...job.execution,reason:'本页面已发送一次执行请求；只读核对结果，不自动重试'}}:job)}
       ${job.state==='UNKNOWN'?`<label>平台作品 ID（缺回执时填写）<input data-platform-id="${esc(job.id)}"></label><button data-reconcile="${esc(job.id)}">只读核对平台结果</button>${job.snapshot.platform==='facebook'&&job.snapshot.transport==='BROWSER'?`<button data-diagnose="${esc(job.id)}">只读诊断（保留现场，不改任务）</button><button data-diagnostic-refresh="${esc(job.id)}">读取诊断进度与证据</button><pre data-diagnostic-report="${esc(job.id)}" role="status" aria-live="polite"></pre>`:''}`:''}
       ${job.state==='UNKNOWN'&&job.evidence.stage==='PREPARING'&&!job.evidence.submissionIntent?`<button data-resolve-preparation="${esc(job.id)}">人工核对准备中断（没有最终提交）</button>`:''}
@@ -137,16 +147,50 @@ export async function mountUnifiedPublisher({workspace,account,token,executionEn
       ${job.evidence.url?`<a target="_blank" rel="noopener" href="${esc(job.evidence.url)}">查看平台作品</a>`:''}
       ${job.evidence.error?`<p>${esc(job.evidence.error)}</p>`:''}
       ${['DRAFT','READY','BLOCKED'].includes(job.state)?`<button data-cancel="${esc(job.id)}">取消任务</button>`:''}
+      ${taskOperatorButtons(job)}
       </article>`).join('')||'<p>当前范围没有发布任务。</p>';
     jobs.querySelectorAll('[data-approve]').forEach(button=>button.onclick=()=>run(button,async()=>{
       const job=result.jobs.find(j=>j.id===button.dataset.approve);
       await request(`/jobs/${encodeURIComponent(job.id)}/approve`,{snapshot_hash:job.snapshot_hash});await loadJobs();
     }));
+    jobs.querySelectorAll('[data-approve-auto]').forEach(button=>button.onclick=()=>run(button,async()=>{const job=result.jobs.find(j=>j.id===button.dataset.approveAuto);await request('/jobs/'+encodeURIComponent(job.id)+'/approve',{snapshot_hash:job.snapshot_hash});const fresh=await loadJobs(),ready=fresh?.jobs.find(j=>j.id===job.id),next=jobs.querySelector('[data-execute="'+job.id+'"]');if(ready?.canExecute&&next)showConfirmation(next,ready);else if(root.isConnected)status.textContent=ready?.execution?.reason||'任务暂不可发布，请核对状态';}));
     jobs.querySelectorAll('[data-cancel]').forEach(button=>button.onclick=()=>run(button,async()=>{
       await request(`/jobs/${encodeURIComponent(button.dataset.cancel)}/cancel`,{});await loadJobs();
     }));
     jobs.querySelectorAll('[data-resolve-preparation]').forEach(button=>button.onclick=()=>run(button,async()=>{if(!window.confirm('准备上传可能已产生临时对象。确认已检查现场，并仅恢复到阻断待审核状态？不会删除平台数据或自动重试。'))return;await request(`/jobs/${encodeURIComponent(button.dataset.resolvePreparation)}/resolve-preparation`,{acknowledge_preparation_effects:true});await loadJobs();}));
     jobs.querySelectorAll('[data-execute]').forEach(button=>button.onclick=()=>showConfirmation(button,result.jobs.find(j=>j.id===button.dataset.execute)));
+    jobs.querySelectorAll('[data-execute-manual]').forEach(button=>button.onclick=()=>showConfirmation(button,result.jobs.find(j=>j.id===button.dataset.executeManual),true));
+    jobs.querySelectorAll('[data-retry]').forEach(button=>button.onclick=()=>{
+      const job=result.jobs.find(j=>j.id===button.dataset.retry);
+      if(job.state==='READY')return showConfirmation(button,job);
+      return run(button,async()=>{
+        if(job.state==='UNKNOWN'){
+          status.textContent='只读核对旧任务，不会再次发布';
+          await request('/jobs/'+encodeURIComponent(job.id)+'/reconcile',{});
+        }else await request('/jobs/'+encodeURIComponent(job.id)+'/reopen',{});
+        await loadJobs();
+      });
+    });
+    jobs.querySelectorAll('[data-finish]').forEach(button=>button.onclick=()=>run(button,async()=>{
+      const job=result.jobs.find(j=>j.id===button.dataset.finish);
+      if(job.state==='UNKNOWN'){
+        if(!window.confirm('只有你已核对平台并确定这篇没有发布，才能结束旧任务并解除阻塞。确认未发布？不确定请取消并只读核对。'))return;
+        await request('/jobs/'+encodeURIComponent(job.id)+'/finish-unpublished',{confirm_not_published:true,snapshot_hash:job.snapshot_hash,authorization_source:'Publisher 用户明确确认冻结任务未发布'});
+        await loadJobs();return;
+      }
+      if(!window.confirm('结束本任务的处理？历史结果会保留，UNKNOWN 仍需核对，不会删除平台作品。'))return;
+      await request('/jobs/'+encodeURIComponent(button.dataset.finish)+'/finish',{});await loadJobs();
+    }));
+    jobs.querySelectorAll('[data-manual-complete]').forEach(button=>button.onclick=()=>run(button,async()=>{
+      const job=result.jobs.find(j=>j.id===button.dataset.manualComplete),reference=window.prompt('请填写你已在平台核对的作品链接或作品 ID。公众号仅代表草稿写入，不代表公开发表。');
+      if(!reference?.trim())return;
+      if(!window.confirm('确认已在 '+job.snapshot.expectedIdentity+' 上核对该冻结稿件及媒体？将记录人工确认，保留旧证据，不会发帖。'))return;
+      const input={acknowledge:true,snapshot_hash:job.snapshot_hash,...(/^https?:\/\//i.test(reference.trim())?{url:reference.trim()}:{platform_id:reference.trim()})};
+      const reported=await request('/jobs/'+encodeURIComponent(job.id)+'/manual-complete',input);
+      try{await request('/jobs/'+encodeURIComponent(job.id)+'/reconcile',{platform_id:reported.evidence.humanConfirmation.platformId||undefined});}
+      catch(error){if(root.isConnected)status.textContent='人工确认已记录，但平台核验未通过：'+error.message+'；保留待核对状态，不会重发。';}
+      await loadJobs();
+    }));
     async function diagnosticProgress(id){const value=await request(`/jobs/${encodeURIComponent(id)}/diagnostics`);if(root.isConnected){const box=jobs.querySelector(`[data-diagnostic-report="${id}"]`);if(box)box.textContent=JSON.stringify(value,null,2);}return value;}
     jobs.querySelectorAll('[data-diagnostic-refresh]').forEach(button=>button.onclick=()=>run(button,()=>diagnosticProgress(button.dataset.diagnosticRefresh)));
     jobs.querySelectorAll('[data-diagnose]').forEach(button=>button.onclick=()=>run(button,async()=>{const job=result.jobs.find(j=>j.id===button.dataset.diagnose);await request(`/jobs/${encodeURIComponent(job.id)}/diagnostics`,{snapshot_hash:job.snapshot_hash});for(let i=0;i<45&&root.isConnected&&button.isConnected;i++){const value=await diagnosticProgress(job.id);if(value.state!=='RUNNING')return;await new Promise(resolve=>setTimeout(resolve,2000));}if(root.isConnected)status.textContent='诊断仍在运行或页面已切换；只读取进度，不会再次启动。';},{enableAfter:false}));
@@ -156,6 +200,7 @@ export async function mountUnifiedPublisher({workspace,account,token,executionEn
       const input=action==='reconcile'?{platform_id:root.querySelector(`[data-platform-id="${id}"]`)?.value||undefined}:{};
       try {await request(`/jobs/${encodeURIComponent(id)}/${action}`,input);}finally{await loadJobs();}
     },{enableAfter:action!=='execute'}));
+    return result;
   }
   root.querySelector('#unified-all-accounts').onchange=()=>loadJobs().catch(e=>{if(root.isConnected)status.textContent=e.message;});
   if(root.querySelector('#unified-switch-transport'))root.querySelector('#unified-switch-transport').onclick=event=>run(event.currentTarget,async()=>{
@@ -166,17 +211,19 @@ export async function mountUnifiedPublisher({workspace,account,token,executionEn
     event.preventDefault();const form=event.currentTarget,input=Object.fromEntries(new FormData(form));input.media=input.media.split('\n').map(x=>x.trim()).filter(Boolean);
     run(form.querySelector('button'),async()=>{await request('/content',input);if(root.isConnected)await onChanged();});
   };
-  const select=root.querySelector('#unified-content');
-  const fillPayload=()=>{const content=contents.find(c=>c.id===select.value),p=content?.platform_payloads?.[account.platform]||content||{};root.querySelector('#unified-payload-title').value=p.title||'';root.querySelector('#unified-payload-body').value=p.body||'';root.querySelector('#unified-payload-tags').value=(p.tags||[]).join('\n');root.querySelector('#unified-payload-author').value=p.author||'驻越经营实录';};select.onchange=fillPayload;fillPayload();
+  const select=root.querySelector('#unified-content'),chosen=formDrafts.resolve(workspace,account.id,preferredContentId,contents);if(chosen){select.value=chosen;select.dataset.userPicked='true';}
+  const fillPayload=()=>{const content=contents.find(c=>c.id===select.value),p=pendingLibrarySelection?{}:publisherPayload(content,account.platform,formDrafts.get(workspace,account.id,select.value));if(formDrafts.get(workspace,account.id,select.value))select.dataset.userPicked='true';root.querySelector('#unified-payload-title').value=p.title||'';root.querySelector('#unified-payload-body').value=p.body||'';root.querySelector('#unified-payload-tags').value=(p.tags||[]).join('\n');root.querySelector('#unified-payload-author').value=p.author||account.display_name||'';let media=[];try{media=content?.platform_payloads?.[account.platform]?.media||JSON.parse(content?.media_json||'[]')}catch{}const preview=root.querySelector('#unified-media-preview');preview.innerHTML=pendingLibrarySelection?'':media.length?media.map((path,index)=>{const url='/api/group-library/content-media?workspace='+encodeURIComponent(workspace)+'&contentId='+encodeURIComponent(select.value)+'&index='+index+'&platform='+encodeURIComponent(account.platform);return /\.mp4$/i.test(path)?'<video controls preload="none" src="'+esc(url)+'"></video>':'<a target="_blank" rel="noopener" href="'+esc(url)+'"><img loading="lazy" src="'+esc(url)+'" alt="已绑定图片 '+(index+1)+'"></a>'}).join(''):'<p>本稿未绑定头图或媒体。</p>';};select.onchange=()=>{formDrafts.select(workspace,account.id,select.value);fillPayload();};fillPayload();
   let publicationStates;
-  const recommend=async(auto=false)=>{const result=await request('/accounts/'+encodeURIComponent(account.id)+'/content-status');if(!root.isConnected)return;publicationStates=result.states;for(const option of select.options){const row=contents.find(c=>c.id===option.value),states=publicationStates[option.value]||[];option.textContent=(row?.title||option.value)+(states.includes('PUBLISHED')?' · 已发布':states.includes('DRAFT_WRITTEN')?' · 草稿已写入':states.includes('PUBLISHED_ID_PENDING')?' · 列表已确认/ID待核对':states.some(s=>['PREPARING','SUBMITTING','UNKNOWN','READY'].includes(s))?' · 执行中/待核对':' · 无已确认发布记录');}if(auto&&select.dataset.userPicked)return;const next=[...contents].sort((a,b)=>String(a.title||'').localeCompare(String(b.title||''),'zh',{numeric:true})).find(c=>!(publicationStates[c.id]||[]).some(s=>['PUBLISHED','DRAFT_WRITTEN','PUBLISHED_ID_PENDING','PREPARING','SUBMITTING','UNKNOWN','READY'].includes(s)));if(next){select.value=next.id;fillPayload();}else if(!auto)status.textContent='没有可推荐的未发布内容；已发布项仍可手工选择。';};
+  const recommend=async(auto=false)=>{const result=await request('/accounts/'+encodeURIComponent(account.id)+'/content-status');if(!root.isConnected)return;publicationStates=result.states;for(const option of select.options){const row=contents.find(c=>c.id===option.value),states=publicationStates[option.value]||[];option.textContent=(row?.title||option.value)+(states.includes('HUMAN_CONFIRMED')?' · 人工确认完成':states.includes('PUBLISHED')?' · 已发布':states.includes('DRAFT_WRITTEN')?' · 草稿已写入':states.includes('PUBLISHED_ID_PENDING')?' · 列表已确认/ID待核对':states.some(s=>['PREPARING','SUBMITTING','UNKNOWN','READY'].includes(s))?' · 执行中/待核对':' · 无已确认发布记录');}if(pendingLibrarySelection||select.disabled||auto&&select.dataset.userPicked)return;const next=[...contents].sort((a,b)=>String(a.title||'').localeCompare(String(b.title||''),'zh',{numeric:true})).find(c=>!(publicationStates[c.id]||[]).some(s=>['HUMAN_CONFIRMED','PUBLISHED','DRAFT_WRITTEN','PUBLISHED_ID_PENDING','PREPARING','SUBMITTING','UNKNOWN','READY'].includes(s)));if(next){select.value=next.id;fillPayload();}else if(!auto)status.textContent='没有可推荐的未发布内容；已发布项仍可手工选择。';};
   select.addEventListener('change',()=>select.dataset.userPicked='true');
-  root.querySelectorAll('#unified-payload-title,#unified-payload-body,#unified-payload-tags,#unified-payload-author').forEach(input=>input.addEventListener('input',()=>select.dataset.userPicked='true'));
+  root.querySelectorAll('#unified-payload-title,#unified-payload-body,#unified-payload-tags,#unified-payload-author').forEach(input=>input.addEventListener('input',()=>{select.dataset.userPicked='true';formDrafts.set(workspace,account.id,select.value,{title:root.querySelector('#unified-payload-title').value,body:root.querySelector('#unified-payload-body').value,tags:root.querySelector('#unified-payload-tags').value.split('\n').map(x=>x.trim()).filter(Boolean),author:root.querySelector('#unified-payload-author').value});}));
   
   root.querySelector('#unified-recommend-next').onclick=event=>run(event.currentTarget,()=>recommend());
   recommend(true).catch(error=>{if(root.isConnected)status.textContent=error.message;});
   root.querySelector('#unified-create').onclick=event=>run(event.currentTarget,async()=>{
+    if(pendingLibrarySelection||select.disabled)throw Error('请先选用勾选资料并核对内容');
     await request('/jobs',{account_id:account.id,content_id:select.value,payload:{title:root.querySelector('#unified-payload-title').value,body:root.querySelector('#unified-payload-body').value,tags:root.querySelector('#unified-payload-tags').value.split('\n').map(s=>s.trim()).filter(Boolean),author:root.querySelector('#unified-payload-author').value}});await loadJobs();
   });
+  if(pendingLibrarySelection){select.disabled=true;root.querySelector('#unified-create').disabled=true;status.textContent='资料库选择已变更，请先选用勾选资料；不会使用旧稿建立任务。';}
   await loadJobs();
 }

@@ -1,5 +1,5 @@
 export const publisherAutomationCapabilities = Object.freeze({
-  version:'1.1.0',
+  version:'1.2.0',
   task_id:'VB-PUBLISHER-V1-V2-INTEGRATION-PLAN-20261005-001',
   implementation_owner:'CLOUD_CODEX',
   transport:'AUTHENTICATED_BROWSER_UI',
@@ -16,6 +16,11 @@ export const publisherAutomationCapabilities = Object.freeze({
     inspect_jobs:{supported:true,container:'#unified-jobs'},
     approve_job:{supported:true,button:'[data-approve="<job_id>"]',requires_explicit_user_authorization:true},
     cancel_job:{supported:true,button:'[data-cancel="<job_id>"]'},
+    retry_job:{supported:true,button:'[data-retry="<job_id>"]',unknown_behavior:'read-only reconciliation; never resubmit'},
+    finish_job:{supported:true,button:'[data-finish="<job_id>"]',preserves_history:true},
+    manually_confirm_completion:{supported:true,button:'[data-manual-complete="<job_id>"]',requires:['explicit human confirmation','platform URL or ID','frozen snapshot hash'],requires_platform_readback:true},
+    confirm_and_auto_publish:{supported:true,default:true,button:'[data-approve-auto="<job_id>"]',ready_button:'[data-execute="<job_id>"]',final_confirmation:'[data-confirm-submit]',requires_explicit_user_authorization:true},
+    manual_publish:{supported:true,button:'[data-execute-manual="<job_id>"]',requires_explicit_user_authorization:true,uses_same_executor:true},
     submit_to_facebook:{supported:false,reason:'acceptance mode; real submission disabled'},
     random_group_selection:{supported:true,count_selector:'#random-group-count',button:'#random-select-groups'},
   },

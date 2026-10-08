@@ -22,6 +22,9 @@ test('library reuses public payload, freezes bytes, deduplicates imports and cre
     const [content]=bridge.import('ws-vietbridge',[selection]);assert.equal(content.body,body);
     assert.equal(bridge.import('ws-vietbridge',[selection])[0].id,content.id);
     const frozen=JSON.parse(content.media_json)[0];writeFileSync(image,'changed media bytes');assert.equal(readFileSync(frozen,'utf8'),'original media bytes');
+    assert.equal(bridge.contentMedia('ws-vietbridge',content.id,0).path,frozen);
+    assert.throws(()=>bridge.contentMedia('ws-vietbridge',content.id,-1),/媒体不存在/);
+    assert.throws(()=>bridge.contentMedia('ws-vietbridge','wrong-content',0),/媒体不存在/);
     const refreshed=bridge.catalogue('ws-vietbridge')[0];assert.notEqual(refreshed.assets[0].revision,firstRevision);assert.notEqual(refreshed.revision,items[0].revision);
     assert.throws(()=>bridge.import('ws-vietbridge',[selection]),/版本已变化/);
     const profile=store.saveProfile('ws-vietbridge',{name:'FB',cdp_port:19325,user_data_dir:join(root,'profile')});

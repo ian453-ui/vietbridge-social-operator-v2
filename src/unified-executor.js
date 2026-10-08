@@ -95,6 +95,7 @@ export class UnifiedExecutor {
     this.publisher.assertCurrent(job);
     const duplicate=this.db.prepare('SELECT snapshot_json,state FROM publisher_jobs WHERE workspace=? AND id<>?').all(job.workspace,job.id).find(row=>{const s=JSON.parse(row.snapshot_json);return guardedStates.includes(row.state)&&platformOf(s)===platformOf(job.snapshot)&&(platformOf(s)==='facebook'?(s.targetPageId||s.externalId):s.externalId)===(job.snapshot.targetPageId||job.snapshot.externalId)&&(s.payloadHash||s.contentHash)===(job.snapshot.payloadHash||job.snapshot.contentHash);});
     if(duplicate)throw Error('同一身份与内容已有提交或待核对任务，不能切换模式重发');
+    if(this.profilePending(job.snapshot.profileId))throw Error('该浏览器账号存在提交中或 UNKNOWN 待核对任务；请先只读核对旧任务，不会自动重发或清锁');
   }
   claim(workspace,id) {
     return this.publisher.store.tx(()=>{
@@ -182,8 +183,25 @@ export class UnifiedExecutor {
       driver.restore?.(job.snapshot,assets.map(x=>x.path),intent?JSON.parse(intent.prepared_json):null);
       let receipt=this.db.prepare('SELECT platform_id AS id,platform_url AS url FROM publisher_submit_receipts WHERE job_id=?').get(id);
       if(!receipt&&input.platform_id){if(!/^[A-Za-z0-9_-]{1,160}$/.test(String(input.platform_id)))throw Error('平台作品 ID 格式无效');receipt={id:String(input.platform_id),url:''};}
-      this.complete(workspace,id,await driver.readback(job.snapshot,receipt));
+      const evidence=await driver.readback(job.snapshot,receipt);
+      this.complete(workspace,id,{...evidence,...(job.evidence.humanConfirmation?{humanConfirmation:job.evidence.humanConfirmation,previousError:job.evidence.error}:{} )});
       return this.publisher.job(workspace,id);
     }finally{try{await driver?.close();}finally{try{release?.();}finally{this.active.delete(job.snapshot.profileId);}}}
+  }
+  resolveNotPublished(workspace,id,input={}) {
+    const job=this.publisher.job(workspace,id);
+    if(job.state!=='UNKNOWN'||input.confirm_not_published!==true||input.snapshot_hash!==job.snapshot_hash||typeof input.authorization_source!=='string'||!input.authorization_source.trim()||input.authorization_source.length>500)throw Error('需要用户明确确认该冻结任务未发布，并提供授权来源');
+    if(this.active.has(job.snapshot.profileId))throw Error('该账号仍在执行任务，不能人工解除');
+    const release=this.acquireResources(job.snapshot,{reconcile:true});
+    try{
+      return this.publisher.store.tx(()=>{
+        const current=this.publisher.job(workspace,id);
+        if(current.state!=='UNKNOWN'||current.snapshot_hash!==input.snapshot_hash)throw Error('任务状态或冻结版本已改变');
+        const time=new Date().toISOString(),evidence={...current.evidence,operatorFinished:true,humanResolution:{outcome:'NOT_PUBLISHED',at:time,source:input.authorization_source.trim(),previousState:'UNKNOWN',snapshotHash:current.snapshot_hash,accountId:current.account_id}};
+        this.db.prepare("UPDATE publisher_jobs SET state='CANCELLED',evidence_json=?,updated_at=? WHERE id=? AND state='UNKNOWN'").run(JSON.stringify(evidence),time,id);
+        this.publisher.store.event(workspace,'publisher_unknown_resolved_not_published',{job_id:id,snapshot_hash:current.snapshot_hash,authorization_source:input.authorization_source.trim()});
+        return this.publisher.job(workspace,id);
+      });
+    }finally{release();}
   }
 }

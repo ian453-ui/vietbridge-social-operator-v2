@@ -1,6 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {ExecutionConfirmation,confirmationScope,executionConfirmationView,validateExecutionConfirmation} from '../src/unified-client.js';
+import {ExecutionConfirmation,confirmationScope,executionConfirmationView,validateExecutionConfirmation,executionButton} from '../src/unified-client.js';
+
+test('default automatic and backup manual entries retain final confirmation',()=>{
+ const f=fixture();f.job.state='READY';f.job.canExecute=true;f.job.execution={mode:'GLOBAL'};
+ assert.match(executionButton(f.job),/确认并自动发布/);
+ assert.match(executionButton(f.job),/手动触发发布（备用）/);
+ assert.match(executionConfirmationView(f.job),/data-confirm-submit>确认并自动发布/);
+ assert.match(executionConfirmationView(f.job,true),/data-confirm-submit>确认并手动触发发布/);
+ f.job.state='UNKNOWN';assert.equal(executionButton(f.job),'');
+});
+test('WeChat execution labels truthfully describe draft writing',()=>{
+ const f=fixture();Object.assign(f.job,{state:'READY',canExecute:true,execution:{mode:'GLOBAL'}});
+ f.job.snapshot.platform='wechat_official_account';
+ assert.match(executionButton(f.job),/确认并自动写入草稿/);
+ assert.match(executionConfirmationView(f.job),/data-confirm-submit>确认并自动写入草稿/);
+});
 
 function fixture(){
   const job={id:'job',workspace:'ws',account_id:'account',content_id:'content',snapshot_hash:'frozen-hash',snapshot:{expectedIdentity:'LP',operatorActorId:'actor',targetPageId:'page',platform:'facebook',transport:'BROWSER',body:'Frozen <script> text',media:[]},execution:{mode:'SINGLE_USE',permitId:'permit',expiresAt:'2030-01-01T00:00:00Z'}};
