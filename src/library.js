@@ -128,6 +128,16 @@ export class GroupLibrary {
   }
   catalogue(workspace,query='',refresh=false){const q=String(query??'').toLowerCase().trim();return this.items(workspace,{refresh}).filter(p=>!q||`${p.articleId} ${p.title} ${p.body}`.toLowerCase().includes(q)).map(p=>({...p,assets:p.assets.map(a=>({name:basename(a.path),role:a.role,size:a.size,revision:a.revision,sourceDriveId:a.sourceDriveId}))}));}
   media(workspace,key,index,revision){const p=this.items(workspace).find(p=>p.key===key);if(!p||p.revision!==revision)throw new Error('资料版本已变化，请刷新资料库');const asset=p.assets[Number(index)];if(!asset)throw new Error('媒体不存在');return asset;}
+  contentMedia(workspace,contentId,index,platform){
+    this.authorize(workspace);
+    const content=this.store.db.prepare('SELECT media_json FROM group_content WHERE workspace=? AND id=?').get(workspace,contentId);
+    const ordinal=Number(index);
+    if(!content||!Number.isInteger(ordinal)||ordinal<0)throw Error('媒体不存在');
+    const variant=platform?this.store.db.prepare('SELECT payload_json FROM publisher_content_variants WHERE content_id=? AND platform=?').get(contentId,platform):null;
+    const path=(variant?JSON.parse(variant.payload_json).media:JSON.parse(content.media_json))[ordinal];
+    if(!path||!realpathSync(path).startsWith(realpathSync(this.snapshotRoot)+'/'))throw Error('媒体不属于已冻结资料');
+    return {path};
+  }
   import(workspace,selections){
     this.authorize(workspace);if(!Array.isArray(selections)||!selections.length||selections.length>20)throw new Error('请选择 1–20 篇资料');
     const all=this.items(workspace),chosen=selections.map(s=>{const p=all.find(p=>p.key===s.key);if(!p||p.revision!==s.revision)throw new Error('所选资料版本已变化，请刷新后重新预览');if(p.ready===false)throw new Error(p.articleId+'：'+p.blockingReason);return p;});

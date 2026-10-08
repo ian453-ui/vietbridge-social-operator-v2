@@ -13,3 +13,10 @@ export class PublisherFormDrafts {
   get(workspace,account,content){return this.values.get(this.key(workspace,account,content));}
   set(workspace,account,content,payload){this.select(workspace,account,content);this.values.set(this.key(workspace,account,content),{...payload,tags:[...(payload.tags||[])]});}
 }
+
+export function publisherPayload(content,platform,draft){
+  const base=content?.platform_payloads?.[platform]||content||{};
+  const tags=base.tags?.length?base.tags:platform==='facebook'&&content?.library_source?.article_id==='CNVISA-FB-021'
+    ?['LPTravel','VisaTrungQuoc','TetDuongLich2027']:[];
+  return {...base,tags,...draft};
+}

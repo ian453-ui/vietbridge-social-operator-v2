@@ -2,7 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
-import {PublisherFormDrafts} from '../src/publisher-form-state.js';
+import {PublisherFormDrafts,publisherPayload} from '../src/publisher-form-state.js';
+
+test('021 uses user-confirmed tags without overriding edits or leaking to other posts',()=>{
+ const content={library_source:{article_id:'CNVISA-FB-021'},body:'caption'};
+ assert.deepEqual(publisherPayload(content,'facebook').tags,['LPTravel','VisaTrungQuoc','TetDuongLich2027']);
+ assert.deepEqual(publisherPayload(content,'facebook',{tags:['Edited']}).tags,['Edited']);
+ assert.deepEqual(publisherPayload(content,'wechat_official_account').tags,[]);
+ assert.deepEqual(publisherPayload({library_source:{article_id:'CNVISA-FB-001'}},'facebook').tags,[]);
+});
 
 test('manual edits and current selection survive remount and stay isolated',()=>{
  const state=new PublisherFormDrafts(),tags=['LPTravel'];

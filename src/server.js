@@ -97,8 +97,8 @@ export function createApp(dbPath=join(runtime?.dataDir||join(homedir(),'Library/
   if(req.method==='GET'&&url.pathname==='/api/publication-verification')return send(res,200,await requestVerifier().list());
   if(req.method==='GET'&&url.pathname==='/api/publication-verification/wechat-browser')return send(res,200,await requestVerifier().wechatBrowserStatus());
   if(req.method==='GET'&&url.pathname==='/api/group-library')return send(res,200,{items:library.catalogue(url.searchParams.get('workspace'),url.searchParams.get('q'),url.searchParams.get('refresh')==='1')});
-  if(req.method==='GET'&&url.pathname==='/api/group-library/media'){
-   const asset=library.media(url.searchParams.get('workspace'),url.searchParams.get('key'),url.searchParams.get('index'),url.searchParams.get('revision'));
+  if(req.method==='GET'&&['/api/group-library/media','/api/group-library/content-media'].includes(url.pathname)){
+   const asset=url.pathname.endsWith('/content-media')?library.contentMedia(url.searchParams.get('workspace'),url.searchParams.get('contentId'),url.searchParams.get('index'),url.searchParams.get('platform')):library.media(url.searchParams.get('workspace'),url.searchParams.get('key'),url.searchParams.get('index'),url.searchParams.get('revision'));
    const ext=asset.path.split('.').at(-1).toLowerCase(),mime={png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',webp:'image/webp',mp4:'video/mp4'}[ext];
    if(!mime)throw Error('媒体格式不支持');res.setHeader('Content-Type',mime);return res.end(await readFile(asset.path));
   }
